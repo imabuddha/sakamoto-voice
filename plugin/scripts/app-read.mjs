@@ -32,25 +32,24 @@ const inPage = `(async () => {
     for (const button of buttons) {
       // The mark names what was read: the app may reuse a button for a newer message.
       const text = norm(messageOf(button).innerText || '');
-      if (button.dataset.sakamotoRead && button.dataset.sakamotoRead === text.slice(0, 80)) {
-        why = 'already read'; continue;
-      }
-      if (key && !norm(messageOf(button).innerText || '').includes(key)) {
+      if (key && !text.includes(key)) {
         // For the log: the start and length of what the newest button's message holds.
         if (button === buttons[0]) {
-          const seen = norm(messageOf(button).innerText || '');
-          why = 'no matching message; the newest holds ' + seen.length + ' chars: ' + seen.slice(0, 40);
+          why = 'no matching message; the newest holds ' + text.length + ' chars: ' + text.slice(0, 40);
         }
         continue;
+      }
+      if (button.dataset.sakamotoRead && button.dataset.sakamotoRead === text.slice(0, 80)) {
+        why = 'already read'; continue;
       }
       // The button reads its whole block. When this reply comes well after the block's start, the
       // block also holds earlier text (a turn that followed a notice, not a new message), which the
       // app would read again first: don't press; the Mac's or the phone's voices read the reply.
-      const at = key ? norm(messageOf(button).innerText || '').indexOf(key) : 0;
+      const at = key ? text.indexOf(key) : 0;
       if (at > EARLIER_TEXT) return 'earlier text first (' + at + ' chars before this reply)';
       button.dataset.sakamotoRead = text.slice(0, 80);
       button.click();
-      return 'clicked' + (key ? ' (at ' + at + ' of ' + norm(messageOf(button).innerText || '').length + ')' : '');
+      return 'clicked' + (key ? ' (at ' + at + ' of ' + text.length + ')' : '');
     }
     if (Date.now() > end) {
       // For the log, when the newest response has no Read aloud button: the page's last labeled
