@@ -241,7 +241,10 @@ Troubleshooting → Enable Developer Mode), a Node inspector listens on `127.0.0
 response that just finished, on the focused Code session's page. It finds that response by its
 opening text (letters and digits only, so formatting doesn't matter), waits up to 8 s for the page
 to draw its button, and marks each button it presses, so an earlier response is never read by
-mistake. Each press is logged in `speak.log`. When the debugger isn't on (it switches off whenever
+mistake. A button reads its whole block, and a reply that follows a notice rather than a new
+message can share a block with the reply before it; when the response starts well into its block,
+the button isn't pressed, and the Mac's or the phone's voices read just the new response. Each
+press is logged in `speak.log`. When the debugger isn't on (it switches off whenever
 the app restarts) or the click fails, the Mac's own voice (`voice_en`, `voice_ja`) speaks instead,
 and `speak.log` says why. This relies on the app's current page structure, so an app update can
 break it; the fallback then speaks instead.
