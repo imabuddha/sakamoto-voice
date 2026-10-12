@@ -1159,6 +1159,16 @@ class AppPhoneCommandTests(Isolated):
         self.assertEqual(json.loads(exchange.call_args[0][1])['kind'], 'stop')
 
 
+
+class NothingToSay(unittest.TestCase):
+    def test_a_bare_ellipsis_is_nothing_to_say(self):
+        for text in ('08:31 …', '8:31…', '…', '07:24 ...', ' 08:31 … '):
+            self.assertTrue(speak.nothing_to_say(text), text)
+
+    def test_anything_more_is_spoken(self):
+        for text in ('08:31 … hello', '08:31 Bumble', 'Wait…', '08:31'):
+            self.assertFalse(speak.nothing_to_say(text), text)
+
 if __name__ == '__main__':
     unittest.main()
 

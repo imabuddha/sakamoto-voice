@@ -646,6 +646,11 @@ def touch(path):
         pass
 
 
+def nothing_to_say(text):
+    """A response that is only an ellipsis, after an optional time ("08:31 …")."""
+    return re.fullmatch(r'\s*(\d{1,2}:\d{2}\s*)?(…|\.\.\.)\s*', text) is not None
+
+
 def launch(text, prompted=True):
     """Hand text to a detached speaker, silencing any earlier one."""
     stop_speaker()
@@ -1214,6 +1219,10 @@ def main():
     text = event.get('last_assistant_message')
     if not isinstance(text, str) or not text.strip():   # older versions: read the transcript
         text = final_text(event.get('transcript_path', ''))
+    if text and nothing_to_say(text):
+        # "08:31 …": she had nothing to say. Speaking it would only cut off a reading in progress.
+        log('response: nothing to say; the voice carries on')
+        return 0
     prompted = not os.path.exists(PROMPTED) or not os.path.exists(RESPONDED) or \
         os.path.getmtime(PROMPTED) >= os.path.getmtime(RESPONDED)
     touch(RESPONDED)

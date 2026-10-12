@@ -139,7 +139,10 @@ Markdown marks, tables, and emoji dropped, ⌘⌥⌃⇧ read as key names), and 
 speaker, so the hook returns at once and never holds up Claude Code. The speaker says it on the
 Mac, sends it to the phone, or both. A new response interrupts one still being spoken, on the Mac
 and on the phone, and sending a new message silences it (a UserPromptSubmit hook runs
-`speak.py stop`). Subagents don't speak (they end with SubagentStop, not Stop).
+`speak.py stop`). A response that is only an ellipsis, after an optional time ("08:31 …"), isn't
+spoken at all and interrupts nothing: it's how Claude says it has nothing to add, for instance
+after a routine notice, and speaking it would only cut off a reading in progress. Subagents don't
+speak (they end with SubagentStop, not Stop).
 
 While the speaker runs, `~/.config/sakamoto-voice/speaker.pid` names it. Sakamoto Eyes (the
 listening companion) watches that file to know when her voice is on, and runs `speak.py hush`
