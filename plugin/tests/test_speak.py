@@ -566,15 +566,31 @@ class SpeakerTests(Isolated):
         self.assertEqual(run.call_count, 2)
         deliver.assert_not_called()
 
-    def test_app_both(self):
-        with mock.patch.object(speak, 'app_read', return_value=True):
+    def test_app_both_streams_without_muting(self):
+        with mock.patch.object(speak, 'app_phone', return_value=None) as app_phone:
+            run, deliver = self.run_speaker({'output': 'app-both', 'default_lang': 'en'})
+        self.assertTrue(app_phone.call_args.kwargs['both'])
+        run.assert_not_called()
+        deliver.assert_not_called()
+
+    def test_app_both_before_the_click_falls_back_to_the_app_here_and_text_there(self):
+        with mock.patch.object(speak, 'app_phone', return_value='before-click'), \
+             mock.patch.object(speak, 'app_read', return_value=True):
             run, deliver = self.run_speaker({'output': 'app-both', 'default_lang': 'en'})
         run.assert_not_called()                  # the app speaks on the Mac
         deliver.assert_called_once()             # and the phone gets the text
-        with mock.patch.object(speak, 'app_read', return_value=False):
+        with mock.patch.object(speak, 'app_phone', return_value='before-click'), \
+             mock.patch.object(speak, 'app_read', return_value=False):
             run, deliver = self.run_speaker({'output': 'app-both', 'default_lang': 'en'})
         self.assertEqual(run.call_count, 2)      # the Mac's own voice instead
         deliver.assert_called_once()
+
+    def test_app_both_when_the_app_did_not_speak(self):
+        for stage in ('not-clicked', 'no-sound'):
+            with mock.patch.object(speak, 'app_phone', return_value=stage):
+                run, deliver = self.run_speaker({'output': 'app-both', 'default_lang': 'en'})
+            self.assertEqual(run.call_count, 2)  # the Mac's voices
+            deliver.assert_called_once()         # and the text to the phone
 
     def test_app_phone_hands_over_to_app_phone(self):
         with mock.patch.object(speak, 'app_phone') as app_phone:
@@ -774,8 +790,8 @@ class FakeTap:
         self.stopped = self.relayed = None
         self.seconds = 3.2
 
-    def __call__(self, path):
-        self.path = path
+    def __call__(self, path, mute=True):
+        self.path, self.mute = path, mute
         return self
 
     def wait_ready(self):
@@ -821,6 +837,18 @@ class AppPhoneTests(Isolated):
         self.end_stream = end_stream
         return tap, reach, click, deliver
 
+    def test_both_streams_unmuted_and_reports_failures_instead_of_falling_back(self):
+        with mock.patch.object(speak, 'tap_path', return_value='/bin/app-voice-tap'), \
+             mock.patch.object(speak, 'Tap', FakeTap()) as tap, \
+             mock.patch.object(speak, 'reach_phone', return_value=(mock.Mock(), {'ok': True})), \
+             mock.patch.object(speak, 'open_stream'), mock.patch.object(speak, 'end_stream'), \
+             mock.patch.object(speak, 'app_read', return_value=False), \
+             mock.patch.object(speak, 'deliver_to_phone') as deliver:
+            self.write_config(self.CFG)
+            stage = speak.app_phone(self.CFG, 'Hi', 'Hi', [('default', 'Hi')], [('en', 'Hi')], set(), both=True)
+        self.assertEqual((stage, tap.mute), ('not-clicked', False))
+        deliver.assert_not_called()
+
     def assert_text_fallback(self, deliver):
         cfg, text, runs, _, _ = deliver.call_args[0]
         self.assertEqual((cfg['phone_mode'], text, runs), ('text', 'Hello 囲碁', [('default', 'Hello'), ('ja', '囲碁')]))
@@ -852,7 +880,7 @@ class AppPhoneTests(Isolated):
         self.assertIn('did not start: System Audio Recording is off', self.log_text())
 
     def test_a_tool_that_cannot_run_sends_the_text(self):
-        def broken(path):
+        def broken(path, mute=True):
             raise PermissionError('not executable')
         _, _, click, deliver = self.run_app_phone(broken)
         click.assert_not_called()

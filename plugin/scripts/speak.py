@@ -37,7 +37,8 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
             "app": the Claude desktop app reads the response in its own voice (its Read aloud
             button, pressed through the app's Main Process Debugger, which Developer mode offers;
             app-read.mjs). When the debugger isn't on, the Mac's voice speaks instead.
-            "app-both": the Claude app's voice on the Mac, and the text to the phone (its own voices).
+            "app-both": the Claude app's voice on the Mac, and streamed to the phone as "app-phone" does
+            (without muting the Mac); when the stream can't start, the text goes to the phone.
             "app-phone": the same voice, streamed live to the phone while the Mac stays silent:
             app-voice-tap (mac/build.sh builds it) taps the Claude app's audio, muted on the Mac,
             and this script streams it to the phone, which also shows the text. When the debugger
@@ -684,9 +685,9 @@ class Tap:
     `speak.py stop`) stops it too, and it removes its tap as it exits; it also stops by itself
     when nobody reads its audio any more."""
 
-    def __init__(self, path):
+    def __init__(self, path, mute=True):
         self.proc = subprocess.Popen(
-            [path, '--stdout', '--mute', '--rate', str(STREAM_RATE),
+            [path, '--stdout'] + (['--mute'] if mute else []) + ['--rate', str(STREAM_RATE),
              '--wait-start', str(TAP_WAIT_START), '--max-seconds', str(TAP_MAX_SECONDS)],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.output = b''        # its standard error
@@ -779,18 +780,25 @@ class Tap:
         return self.proc.returncode
 
 
-def app_phone(cfg, raw, text, runs, mac_runs, voices):
+def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
     """The Claude app reads the response in its own voice, streamed live to the phone, with the
     Mac silent. Whenever that can't happen before the voice begins, the phone gets the text and
-    speaks it in its own voices, so something is always heard; speak.log says why."""
-    def fallback(reason):
+    speaks it in its own voices, so something is always heard; speak.log says why.
+
+    both (output app-both): the Mac isn't muted, so the voice plays here and on the phone. Then a
+    failure doesn't fall back here; it returns where things stopped, for the caller to choose:
+    'before-click' (nothing pressed yet), 'not-clicked', or 'no-sound'. None when it streamed."""
+    def fallback(reason, stage='before-click'):
+        if both:
+            log(f'app-both: {reason}')
+            return stage
         log(f'app-phone: {reason}; sending the text to the phone')
         deliver_to_phone(dict(cfg, phone_mode='text'), text, runs, mac_runs, voices)
 
     token = cfg.get('phone_token', '')
     if not token:
         log('app-phone: not paired (speak.py pair CODE)')
-        return
+        return 'before-click' if both else None
     path = tap_path(cfg)
     if not path:
         return fallback('app-voice-tap is not built (run mac/build.sh)')
@@ -798,18 +806,18 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices):
     header = stream_header(token, text)
     opened = reach_phone(lambda address: open_stream(address, header))   # finds the phone again if it moved
     if not opened:
-        log('app-phone: the phone did not answer (unreachable); nothing read aloud')
-        return
+        log('app-phone: the phone did not answer (unreachable)' + ('' if both else '; nothing read aloud'))
+        return 'before-click' if both else None
     sock, ack = opened
     if ack is None:
         sock.close()
         return fallback("the phone didn't answer the stream (is its app 0.3.0 or later?)")
     if not ack.get('ok'):
         sock.close()
-        log(f'app-phone: the phone refused the stream ({ack.get("error")}); nothing read aloud')
-        return
+        log(f'app-phone: the phone refused the stream ({ack.get("error")})' + ('' if both else '; nothing read aloud'))
+        return 'before-click' if both else None
     try:
-        tap = Tap(path)
+        tap = Tap(path, mute=not both)
     except OSError as e:
         sock.close()
         return fallback(f'app-voice-tap did not start: {e}')
@@ -821,7 +829,7 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices):
         if not app_read(raw, delay=max(0.0, APP_READ_DELAY - (time.monotonic() - started))):
             tap.stop(grace=0)
             sock.close()
-            return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found")
+            return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found", 'not-clicked')
         cut = tap.relay(sock, timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30)
         status = tap.stop(grace=0 if cut else 3.0)
     except BaseException:
@@ -833,7 +841,7 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices):
         log(f'app-phone: {cut}, after {tap.seconds:.1f} s; app-voice-tap: {tap.last_line()}')
     elif status == TAP_NO_SOUND:
         sock.close()
-        fallback(f'no sound from the Claude app ({tap.last_line()})')
+        return fallback(f'no sound from the Claude app ({tap.last_line()})', 'no-sound')
     else:
         end_stream(sock)
         if status == 0:
@@ -882,7 +890,12 @@ def speak(path):
     if output == 'app':
         output = None if app_read(raw, APP_READ_DELAY) else 'mac'   # the app's own voice, else the Mac's
     elif output == 'app-both':
-        output = 'phone' if app_read(raw, APP_READ_DELAY) else 'both'   # the app's voice here, text there
+        # The app's voice here and streamed to the phone; failing that, as much of it as can be had.
+        stage = app_phone(cfg, raw, text, phone_runs, chunks, voices, both=True) if chunks else 'before-click'
+        if stage == 'before-click':     # the app's voice here, the text to the phone
+            output = 'phone' if app_read(raw, APP_READ_DELAY) else 'both'
+        else:                           # the app didn't speak: the Mac's voices and the text
+            output = 'both' if stage else None
     elif output == 'app-phone':
         if chunks:
             app_phone(cfg, raw, text, phone_runs, chunks, voices)   # the app's voice on the phone, else text there
@@ -975,8 +988,8 @@ def main():
             print('Responses are spoken on', {
                 'mac': 'the Mac', 'phone': 'the phone', 'both': 'the Mac and the phone',
                 'app': "the Claude app, in its own voice (the Mac's when its debugger is off)",
-                'app-both': "the Mac, in the Claude app's own voice (the Mac's when its debugger is off), "
-                            "and the phone, in its own voices",
+                'app-both': "the Mac and the phone, in the Claude app's own voice, streamed live (the "
+                            "phone's own voices, from the text, when that can't start)",
                 'app-phone': "the phone, in the Claude app's own voice, streamed live while the Mac stays "
                              "silent (the phone's own voices, from the text, when the app's debugger is off)",
             }[args[1]] + '.')

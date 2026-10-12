@@ -114,7 +114,7 @@ prints them; most are set by the commands below, and the rest you can edit by ha
 | `rate` | words per minute (`say -r`); 0 keeps the voice's own pace |
 | `device` | an audio output for `say -a`, such as a paired Bluetooth speaker (`say -a '?'` lists them); empty uses the current output |
 | `max_chars` | a longer response is cut there, with a note that the rest is on screen (6000) |
-| `output` | `"mac"` (the default), `"phone"`, `"both"`, `"app"`, `"app-both"`, or `"app-phone"` (`sakamoto output ...`; the last three are experimental, below; `app-both` is the Claude app's voice on the Mac plus the text to the phone) |
+| `output` | `"mac"` (the default), `"phone"`, `"both"`, `"app"`, `"app-both"`, or `"app-phone"` (`sakamoto output ...`; the last three are experimental, below; `app-both` is the Claude app's voice on the Mac and streamed to the phone, as `app-phone` does but without muting the Mac) |
 | `phone_mode` | `"text"` (the default; the phone speaks in its own voices) or `"audio"` (rendered on the Mac with `say -o` in `voice_en`, `voice_ja`, and `rate`, and played on the phone; `sakamoto phone-mode ...`) |
 | `phone_token` | the phone's pairing code (`sakamoto pair` sets it) |
 | `phone`, `phone_name` | the phone's `host:port` and Bonjour name, found and kept automatically |
@@ -380,7 +380,7 @@ with the next response. Changes to `hooks.json` still need the update and the re
 `ios/project.yml` is the source of the Xcode project (generated and git-ignored); signing is in
 `ios/Config/Signing.xcconfig`, with your team in the git-ignored `Signing.local.xcconfig` beside it.
 The app's version (`MARKETING_VERSION` in `project.yml`) follows the plugin's, except for changes on
-one side only: the plugin is 0.3.1 (`app-voice-tap` captures, `speak.py` streams) and the app is
+one side only: the plugin is 0.3.2 (`app-voice-tap` captures, `speak.py` streams; `app-both` streams too) and the app is
 still 0.3.0 (build 6). The app's pure parts (protocol, pairing, language runs, schedule, keep-alive
 sound, and streams' framing and jitter buffer) and its receiver are in the `SakamotoVoiceKit`
 package, which `app-voice-tap` uses too, and which also has `voice-listen`, a stand-in phone on the
