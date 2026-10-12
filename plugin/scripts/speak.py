@@ -1020,9 +1020,9 @@ def speak(path, prompted=True):
     text, chunks, phone_runs = prepare(speakable(text), cfg)
     output = cfg.get('output') if cfg.get('output') in OUTPUTS else 'mac'
     if not prompted and output.startswith('app'):
-        # After a notice the app would read the response before this one too: other voices instead.
-        output = {'app': 'mac', 'app-both': 'both', 'app-phone': 'phone'}[output]
-        log(f'app: a response without a new prompt; {output} voices instead')
+        # After a notice the response may share a block with the one before; app-read presses the
+        # button only when this response starts its block, so the app's voice is still tried.
+        log('app: a response without a new prompt; the app reads it only if it starts its block')
     if output == 'app':
         output = None if app_read(raw, APP_READ_DELAY) else 'mac'   # the app's own voice, else the Mac's
     elif output == 'app-both':

@@ -1132,16 +1132,13 @@ class ReadKeyAndDevHandoff(unittest.TestCase):
 
 
 class PromptedAndRemote(SpeakerTests):
-    """A response after a notice skips the app's voice; phone_remote is tried first."""
+    """A response after a notice still tries the app's voice (app-read guards against a shared
+    block); phone_remote is tried first."""
 
-    def test_unprompted_app_outputs_use_other_voices(self):
-        for output, expect_run, expect_deliver in (('app', 2, 0), ('app-both', 2, 1)):
-            with mock.patch.object(speak, 'app_read') as click, \
-                 mock.patch.object(speak, 'app_phone') as app_phone:
-                run, deliver = self.run_speaker({'output': output, 'default_lang': 'en'}, prompted=False)
-            click.assert_not_called()
-            app_phone.assert_not_called()
-            self.assertEqual((run.call_count, deliver.call_count), (expect_run, expect_deliver))
+    def test_unprompted_app_output_still_tries_the_app(self):
+        with mock.patch.object(speak, 'app_read', return_value=True) as click:
+            self.run_speaker({'output': 'app', 'default_lang': 'en'}, prompted=False)
+        click.assert_called_once()
 
     def test_prompted_marks(self):
         self.assertTrue(os.path.basename(speak.PROMPTED) and os.path.basename(speak.RESPONDED))

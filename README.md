@@ -451,9 +451,9 @@ opening text (letters and digits only, so formatting doesn't matter), waits up t
 to draw its button, and marks each button it presses, so an earlier response is never read by
 mistake. A button reads its whole block, and a reply that follows a notice rather than a new
 message can share a block with the reply before it; when the response starts well into its block,
-the button isn't pressed, and the Mac's or the phone's voices read just the new response. In the
-same way, a response that comes without a new prompt from you (after a notice, such as a background
-task finishing) skips the app's voice: the app would read the response before it too. Each
+the button isn't pressed, and the Mac's or the phone's voices read just the new response. That
+check also covers a response that comes without a new prompt from you (after a notice, such as a
+background task finishing): it gets the app's voice when it has a block of its own. Each
 press is logged in `speak.log`. When the debugger isn't on (it switches off whenever
 the app restarts) or the click fails, the Mac's own voice (`voice_en`, `voice_ja`) speaks instead,
 and `speak.log` says why. This relies on the app's current page structure, so an app update can
