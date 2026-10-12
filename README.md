@@ -128,7 +128,10 @@ download, for example, Zoe or Ava (Premium) and Kyoko (Enhanced), then put their
 `say -v '?'` lists them, in the config. A voice that isn't installed falls back to the system voice.
 
 Failures in the detached speaker are silent but logged to `~/.config/sakamoto-voice/speak.log`
-(which starts over past 64 KB, keeping the previous one as `speak.log.1`).
+(which starts over past 64 KB, keeping the previous one as `speak.log.1`). Each streamed reading
+(`app-phone`, `app-both`) is also kept, for checking what the Claude app's voice actually said:
+`~/.config/sakamoto-voice/recordings/latest.wav`, with the response's text in `latest.txt`; the
+one before moves to `previous.*`, and older ones are never kept.
 
 ## The iPhone app
 
