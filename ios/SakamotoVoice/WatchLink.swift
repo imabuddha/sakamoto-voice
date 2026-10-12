@@ -69,7 +69,10 @@ final class WatchLink: NSObject {
         session.transferUserInfo(message.dictionary)
     }
 
-    /// Posts the message as a notification (shown at once), for the watch.
+    static let latestNotificationID = "latest"
+
+    /// Posts the message as a notification (shown at once), for the watch. Only the latest stays:
+    /// each one replaces the one before (one identifier), so they don't stack up (John, 2026-10-13).
     func notify(_ message: MirroredMessage) {
         guard notificationsAllowed != false else { return }
         let content = UNMutableNotificationContent()
@@ -79,8 +82,10 @@ final class WatchLink: NSObject {
         content.categoryIdentifier = MirroredMessage.notificationCategory
         content.threadIdentifier = "messages"
         content.userInfo = message.dictionary
-        let request = UNNotificationRequest(identifier: message.id, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { _ in }
+        let center = UNUserNotificationCenter.current()
+        center.removeAllDeliveredNotifications()
+        let request = UNNotificationRequest(identifier: Self.latestNotificationID, content: content, trigger: nil)
+        center.add(request) { _ in }
     }
 
     // MARK: - Permission

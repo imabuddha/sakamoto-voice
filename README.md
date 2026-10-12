@@ -252,7 +252,7 @@ Voice (`ios/`), and the Mac sends it each response over the local network. The a
 - **Passes messages on to an Apple Watch** (below), when the watch app is installed.
 
 Before the first message it shows the pairing code, how to pair, and, small at the bottom, the
-installed version ("Sakamoto Voice 1.1 (9)"); Settings → About shows it too.
+installed version ("Sakamoto Voice 1.1.1 (10)"); Settings → About shows it too.
 
 It runs on iOS 18 and later, so older phones such as the iPhone XS can serve as speakers.
 
@@ -333,7 +333,7 @@ Mac's audio, or the Claude app's streamed voice, by its text):
   background);
 - while the phone's app isn't on screen (so a phone in hand isn't nagged), posts a notification,
   "Miss Sakamoto" with the text (without voice markers, cut at 1,000 characters), and a **Speak**
-  action. iOS shows a notification on the watch only while the phone is **locked or its screen is
+  action. Only the latest stays: each new one replaces the one before, so they don't stack up. iOS shows a notification on the watch only while the phone is **locked or its screen is
   off** and the watch is on your wrist and unlocked; with the phone's app open on its stand and Keep
   Screen On, no notification is posted, so lock the phone (or let it lock) before you walk off.
 
