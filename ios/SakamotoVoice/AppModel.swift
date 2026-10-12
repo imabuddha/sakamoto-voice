@@ -186,12 +186,13 @@ final class AppModel {
         pathMonitor.start(queue: DispatchQueue(label: "com.pragmaphilia.SakamotoVoice.path"))
     }
 
-    /// Cellular data, or another path iOS counts as expensive (a Personal Hotspot, say). Through a
+    /// Cellular data, another path iOS counts as expensive (a Personal Hotspot, say), or Low Data
+    /// Mode (the person asked to save data on this network). Through a
     /// VPN such as Tailscale, the path runs over the tunnel's interface, which iOS marks with the
     /// cost and type of the interface the tunnel itself runs over, so a phone on cellular data
     /// still counts as cellular (expected from Network.framework's design; see README.md).
     nonisolated static func isCellular(_ path: NWPath) -> Bool {
-        path.isExpensive || path.usesInterfaceType(.cellular)
+        path.isExpensive || path.isConstrained || path.usesInterfaceType(.cellular)
     }
 
     // MARK: - Pairing

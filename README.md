@@ -161,7 +161,7 @@ Voice (`ios/`), and the Mac sends it each response over the local network. The a
 - **Chooses Claude's voice or the text**, to save mobile data (a stream is about 48 KB/s, roughly
   170 MB an hour). Settings' "Claude's Voice" offers **Claude's Voice** (always take the stream),
   **Text on Cellular** (the default: the stream on Wi-Fi, the text on cellular data or another
-  network iOS counts as expensive, such as a Personal Hotspot), and **Text Only**. With the text,
+  network iOS counts as expensive, such as a Personal Hotspot, or one in Low Data Mode), and **Text Only**. With the text,
   the phone reads it in its own voices. Its footer says which network the phone is on and what
   the Mac is told.
 - **Shows** the last five messages, newest first and large, older ones below in a lighter style;
