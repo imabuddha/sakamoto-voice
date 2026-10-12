@@ -600,6 +600,31 @@ def stop_speaker():
         pass
 
 
+NOTICE_TAGS = ('<task-notification', '<system-reminder', '<local-command', '<bash-')
+
+
+def is_notice(prompt):
+    """Whether a submitted prompt is a notice Claude Code delivered rather than a message typed by
+    you: it starts with one of the harness's tags."""
+    return isinstance(prompt, str) and prompt.lstrip().startswith(NOTICE_TAGS)
+
+
+def hook_notice():
+    """When stdin is a UserPromptSubmit hook's JSON whose prompt is a notice, the notice's tag;
+    else ''. (Typed at a terminal, stdin isn't read.)"""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return ''
+        # A hook's JSON is there at once; anything else (an open pipe with nothing coming) isn't
+        # waited for.
+        if not select.select([sys.stdin], [], [], 0.5)[0]:
+            return ''
+        prompt = json.load(sys.stdin).get('prompt', '')
+    except (ValueError, OSError, AttributeError):
+        return ''
+    return prompt.lstrip()[1:].split('>', 1)[0].split()[0][:30] if is_notice(prompt) else ''
+
+
 def touch(path):
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1093,6 +1118,13 @@ def main():
                 stop_phone(cfg)
             print('Voice', cmd)
         elif cmd == 'stop':
+            # From the UserPromptSubmit hook, stdin holds the prompt. Claude Code delivers notices
+            # (a background task finishing, say) as prompts too; those neither count as a prompt
+            # from you nor silence the voice.
+            notice = hook_notice()
+            if notice:
+                log(f'prompt: a notice ({notice}); the voice carries on')
+                return 0
             touch(PROMPTED)
             stop_speaker()
             stop_phone(cfg)

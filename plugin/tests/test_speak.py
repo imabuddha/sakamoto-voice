@@ -1356,3 +1356,11 @@ class Recordings(Isolated):
             self.assertTrue(f.read().endswith('reply 3'))
         with wave.open(os.path.join(speak.RECORDINGS, 'previous.wav')) as w:
             self.assertEqual(w.getnframes(), 2)
+
+
+class Notices(unittest.TestCase):
+    def test_is_notice(self):
+        self.assertTrue(speak.is_notice('<task-notification>\n<task-id>x</task-id>'))
+        self.assertTrue(speak.is_notice('  <system-reminder>hi'))
+        self.assertFalse(speak.is_notice('Okay, try it now.'))
+        self.assertFalse(speak.is_notice('I love <b>tags</b>'))
