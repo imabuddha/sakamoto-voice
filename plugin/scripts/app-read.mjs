@@ -31,7 +31,8 @@ const inPage = `(async () => {
     const buttons = [...document.querySelectorAll(label)].slice(-4).reverse();
     for (const button of buttons) {
       // The mark names what was read: the app may reuse a button for a newer message.
-      const text = norm(messageOf(button).innerText || '');
+      // The app may head a block with a label ("Claude responded"), which isn't earlier text.
+      const text = norm(messageOf(button).innerText || '').replace(/^clauderesponded/, '');
       if (key && !text.includes(key)) {
         // For the log: the start and length of what the newest button's message holds.
         if (button === buttons[0]) {
