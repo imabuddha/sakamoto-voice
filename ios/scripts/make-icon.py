@@ -2,7 +2,7 @@
 """Draws Sakamoto Voice's app icon, "Bleep, speaking": our own little creature on the left and three
 sound-wave arcs fanning out to the right, in glowing vector lines (the look of Space Flees 2100: a
 hot, nearly white core in each line and a soft colored halo, as on a vector arcade display) on a
-dark indigo fill. Needs Pillow and NumPy; offscreen.
+plain black (John, 2026-10-13; it was a dark indigo). Needs Pillow and NumPy; offscreen.
 
     python3 ios/scripts/make-icon.py [--preview out.png]
 
@@ -12,7 +12,7 @@ gradient with a darker one for the dark appearance, and two groups) and its two 
 lit appearances (default, dark, tinted, and clear) and flattens it for iOS 18. --preview also writes
 the composed icon, flat, with the corners rounded, for review.
 
-Bleep: a rounded, boxy body drawn in warm coral outline, two round eyes, an open "O" mouth (it's
+Bleep: a rounded, boxy body drawn in a saturated orange outline, two round eyes, an open "O" mouth (it's
 singing), one antenna with a glowing bead, two short legs, and two arms: the right one reaching
 out toward the waves, its hand open, as if projecting its voice, and the left one hanging relaxed
 at its side. The waves are teal, centered on the mouth's height.
@@ -25,16 +25,17 @@ SIZE = 1024
 SS = 4                                   # strokes drawn at 4x, then reduced: smooth curves
 
 # Colors (sRGB, 0..1).
-CORAL = (1.00, 0.45, 0.30)               # the creature
+CORAL = (1.00, 0.30, 0.00)               # the creature: a saturated orange (John, 2026-10-13)
 TEAL = (0.10, 0.90, 0.85)                # the waves
-FILL_TOP, FILL_BOTTOM = (0.165, 0.110, 0.380), (0.035, 0.027, 0.110)          # indigo to night
-DARK_TOP, DARK_BOTTOM = (0.090, 0.059, 0.220), (0.012, 0.012, 0.040)
+# Plain black in every appearance (John, 2026-10-13).
+FILL_TOP, FILL_BOTTOM = (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+DARK_TOP, DARK_BOTTOM = FILL_TOP, FILL_BOTTOM
 
 # Each line: a near-white core, the line itself in its color, and two halos (Gaussian sigma in
 # pixels at 1024, and strength).
 HALOS = ((9, 0.85), (30, 0.75), (70, 0.35))
 CORE_SHARE = 0.45                        # the core's width, as a share of the line's
-CORE_WHITE = 0.65                        # how far the core goes toward white
+CORE_WHITE = 0.25                        # how far the core goes toward white
 
 LINE = 24                                # the line width at 1024 pixels: about 4 px at 60 pt @3x
 SCALE = 1.1                              # the layout below, enlarged about the center

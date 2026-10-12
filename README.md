@@ -302,10 +302,10 @@ with its own code, the one whose code was given is the one paired.
 
 ### The icon
 
-The app's icon is its own character, Bleep: a boxy coral outline with two round eyes, an antenna,
+The app's icon is its own character, Bleep: a boxy saturated-orange outline with two round eyes, an antenna,
 two short legs, and its mouth open in song, one arm reaching toward three teal sound-wave arcs,
-drawn as glowing vector lines on a dark indigo fill. It is an Icon Composer document,
-`ios/SakamotoVoice/AppIcon.icon`: an `icon.json` with the fill (a darker one for the dark
+drawn as glowing vector lines on plain black. It is an Icon Composer document,
+`ios/SakamotoVoice/AppIcon.icon`: an `icon.json` with the fill (black in every
 appearance) and two transparent 1024×1024 layers, `Assets/creature.png` in front of
 `Assets/waves.png`. On iOS 26 the system lights the layers with depth, in the default, dark, tinted,
 and clear appearances; for iOS 18, Xcode flattens it into ordinary icon images. Both layers are
