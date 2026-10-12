@@ -21,6 +21,73 @@ It has four parts:
   core;
 - `mac/AppVoiceTap`: `app-voice-tap`, a capture tool for the experimental phone mode.
 
+## Here's how to deal with 🍎💩
+
+What we learned the hard way setting this up with Xcode 27.1, iOS 27, and watchOS 27. Read this
+before you lose an evening to it.
+
+**Xcode 27 won't find your Apple Watch by itself.** Older Xcodes paired a watch automatically
+through its iPhone. Xcode 27 doesn't: it sees the watch, logs "supports user-driven network
+pairing flows. Skipping companion proxy bootstrap pairing", and says nothing to you. The watch never
+shows up in Device Hub or as a run destination (only "Any watchOS Device"), and the watch's
+Developer Mode switch doesn't exist yet. Restarting things, toggling Wi-Fi, and resetting the
+phone don't help. Pair it by hand:
+
+1. Use the Xcode that has the watchOS platform installed (Settings → Components → watchOS; about
+   3.8 GB), with the iPhone plugged in and unlocked and the watch unlocked on your wrist.
+2. In **Device Hub** (Xcode 27's replacement for the Devices window: the Xcode menu → Open
+   Developer Tool → Device Hub), click **+** → **Pair Nearby Device…** → **Apple Watch**, and leave
+   that sheet open.
+3. Now, on the watch, **Settings → Privacy & Security → Developer Mode** appears. Turn it on; the
+   watch restarts; confirm with Turn On and your passcode.
+4. On the watch again, **Settings → Privacy & Security**, at the very bottom: **Pair with** your
+   Mac. Enter the PIN it shows in Device Hub. (Settings → Developer → Paired Computers only lists
+   Macs; it can't pair.) The watch now appears in Device Hub.
+5. If there's no PIN, or it hangs on "Waiting to Pair", turn the iPhone off completely and try
+   again.
+
+Don't remove the watch from Xcode afterward, and don't tap Don't Trust: developers report it's hard
+to get back.
+
+**Then install the watch app directly** (the phone's Watch app may still refuse a
+development-signed app): build the watch scheme for the watch, which registers it with your team,
+and install it with `devicectl`:
+
+    cd ios
+    xcodebuild -project SakamotoVoice.xcodeproj -scheme SakamotoVoiceWatch -configuration Release \
+      -destination "id=<the watch's UDID>" -allowProvisioningUpdates \
+      -allowProvisioningDeviceRegistration DEVELOPMENT_TEAM=<your team> \
+      -derivedDataPath build/DerivedData build
+    xcrun devicectl device install app --device <the watch's UDID> \
+      build/DerivedData/Build/Products/Release-watchos/SakamotoVoiceWatch.app
+
+(`xcrun devicectl list devices` shows the watch's UDID once it's paired; `scripts/build.sh` makes
+the Xcode project; rebuild and reinstall the iPhone app too, so its embedded watch app matches.) A
+first attempt can fail with "Connection invalid" until the watch is registered and awake.
+
+**If the iPhone's Watch app won't install ANY app** (Install spins, then shows Install again, even
+for Apple's own apps, while installing from the watch's own App Store works): on the iPhone,
+Settings → your name → Media & Purchases → Sign Out, then sign back in. That fixed it for us;
+restarts, Reset Sync Data, Automatic App Install, and Airplane Mode didn't.
+
+**Better voices on the watch.** The watch's default voices are rough. Download Premium or Enhanced
+voices on the watch under **Settings → Accessibility → Live Speech** (they're shared with apps),
+then choose them in the watch app's **Voices** section (at the bottom). Until you choose, it uses
+the highest-quality voice installed, from any region.
+
+**Known limitations**
+
+- The watch speaks only while its app is in front (watchOS gives background audio only to
+  long-form audio over Bluetooth). Otherwise you get a notification with a Speak button.
+- Notifications go to the watch only while the iPhone is locked.
+- Claude's own voice can't be streamed to the watch; the watch reads the text in its own voices.
+- On the phone and watch, the voice switches by script: Japanese text in the Japanese voice;
+  numbers, times, and Latin letters in the English one.
+- Streamed replies currently lose the 〔en〕/〔ja〕 markers on the way to the watch (a fix is
+  planned).
+- The Claude app's Read aloud, with a Japanese voice reading English, sometimes slips into a few
+  seconds of unrelated Japanese at numbers; it's reported to Anthropic.
+
 ## Requirements
 
 - **A Mac** with macOS 15 or later.
@@ -353,13 +420,11 @@ the reports of silence on the watch's speaker:
 The watch app is built into the iPhone app (in its `Watch` folder), so `scripts/build.sh install`
 installs both on the phone. Then:
 
-1. Turn on Developer Mode on the watch (Settings → Privacy & Security → Developer Mode), which a
-   development-signed app needs; it appears once the watch has been seen by Xcode through its
-   iPhone (Xcode's Devices and Simulators window).
-2. In the Watch app on the iPhone, under Available Apps, install Sakamoto Voice (or let Automatic
-   App Install do it). Should the watch refuse it, the watch isn't in your team's profile yet:
-   open `ios/SakamotoVoice.xcodeproj` once, pick the SakamotoVoiceWatch scheme and the watch, and
-   Run, which registers it.
+1. Pair the watch with Xcode by hand and turn on its Developer Mode, as described in
+   [Here's how to deal with 🍎💩](#heres-how-to-deal-with-) above (Xcode 27 no longer does it
+   through the iPhone).
+2. Install the watch app: in the Watch app on the iPhone, under Available Apps, or directly with
+   `devicectl`, as described there (the direct way works when the phone's route won't).
 3. Open Sakamoto Voice on the phone: Settings → Apple Watch → Mirror to Apple Watch is on; allow
    notifications when asked.
 4. Optionally, on the watch, Settings → General → Wake Screen → Return to Clock → Sakamoto Voice:
