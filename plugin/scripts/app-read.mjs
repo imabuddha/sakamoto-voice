@@ -30,7 +30,11 @@ const inPage = `(async () => {
   for (;;) {
     const buttons = [...document.querySelectorAll(label)].slice(-4).reverse();
     for (const button of buttons) {
-      if (button.dataset.sakamotoRead) { why = 'already read'; continue; }
+      // The mark names what was read: the app may reuse a button for a newer message.
+      const text = norm(messageOf(button).innerText || '');
+      if (button.dataset.sakamotoRead && button.dataset.sakamotoRead === text.slice(0, 80)) {
+        why = 'already read'; continue;
+      }
       if (key && !norm(messageOf(button).innerText || '').includes(key)) {
         // For the log: the start and length of what the newest button's message holds.
         if (button === buttons[0]) {
@@ -44,7 +48,7 @@ const inPage = `(async () => {
       // app would read again first: don't press; the Mac's or the phone's voices read the reply.
       const at = key ? norm(messageOf(button).innerText || '').indexOf(key) : 0;
       if (at > EARLIER_TEXT) return 'earlier text first (' + at + ' chars before this reply)';
-      button.dataset.sakamotoRead = '1';
+      button.dataset.sakamotoRead = text.slice(0, 80);
       button.click();
       return 'clicked' + (key ? ' (at ' + at + ' of ' + norm(messageOf(button).innerText || '').length + ')' : '');
     }
