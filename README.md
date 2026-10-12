@@ -154,7 +154,7 @@ Voice (`ios/`), and the Mac sends it each response over the local network. The a
   again. A new message, Stop on the phone, or a new prompt on the Mac ends a stream.
 - **Shows** the last five messages, newest first and large, older ones below in a lighter style;
   each new message scrolls back to the top so its beginning is in view. One slim bar at the top
-  holds the status (a dot for listening or speaking, and Awake) and small Stop, Repeat, and Settings
+  holds the status (a dot for listening or speaking, and Awake, marked with Miss Sakamoto's 👩🏻‍🔬 avatar) and small Stop, Repeat, and Settings
   buttons, so the text gets nearly the whole screen, sideways on a stand or upright.
 - **Stays awake** (on by default): with "Stay Awake in the Background" on, it loops a near-silent
   sound, which keeps iOS from suspending it, so it keeps listening with the screen locked or another
@@ -384,7 +384,7 @@ with the next response. Changes to `hooks.json` still need the update and the re
 `ios/Config/Signing.xcconfig`, with your team in the git-ignored `Signing.local.xcconfig` beside it.
 The app's version (`MARKETING_VERSION` in `project.yml`) follows the plugin's, except for changes on
 one side only: the plugin is 0.3.2 (`app-voice-tap` captures, `speak.py` streams; `app-both` streams too) and the app is
-still 0.3.0 (build 6). The app's pure parts (protocol, pairing, language runs, schedule, keep-alive
+0.3.1 (build 7: Miss Sakamoto's avatar marks "Awake"). The app's pure parts (protocol, pairing, language runs, schedule, keep-alive
 sound, and streams' framing and jitter buffer) and its receiver are in the `SakamotoVoiceKit`
 package, which `app-voice-tap` uses too, and which also has `voice-listen`, a stand-in phone on the
 Mac that prints what arrives (and, with `--save DIR`, keeps streams as WAV files):

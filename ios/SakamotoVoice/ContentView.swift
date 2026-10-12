@@ -62,8 +62,14 @@ private struct TopBar: View {
             }
             .accessibilityElement(children: .combine)
             if model.keepAlive.isRunning {
-                Label("Awake", systemImage: "moon.zzz")
-                    .help("Keeps listening in the background and with the screen locked")
+                // Miss Sakamoto's avatar (the woman-scientist emoji, drawn by iOS): she's on duty.
+                HStack(spacing: 4) {
+                    Text("👩🏻‍🔬")
+                    Text("Awake")
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Awake")
+                .help("Keeps listening in the background and with the screen locked")
             } else if model.keepAlive.isInterrupted {
                 Label("Paused", systemImage: "phone")
                     .help("Something else has the audio (a call, say); staying awake resumes when it ends")
