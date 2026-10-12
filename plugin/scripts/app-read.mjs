@@ -52,7 +52,15 @@ const inPage = `(async () => {
       button.click();
       return 'clicked' + (key ? ' (at ' + at + ' of ' + norm(messageOf(button).innerText || '').length + ')' : '');
     }
-    if (Date.now() > end) return why;
+    if (Date.now() > end) {
+      // For the log, when the newest response has no Read aloud button: the page's last labeled
+      // buttons (a reading in progress may show a different control).
+      if (why === 'already read') {
+        const labels = [...document.querySelectorAll('button[aria-label]')].slice(-8).map((b) => b.getAttribute('aria-label'));
+        why += '; last buttons: ' + labels.join(' | ');
+      }
+      return why;
+    }
     await new Promise((r) => setTimeout(r, 500));
   }
 })()`;
