@@ -1165,3 +1165,175 @@ class PromptedAndRemote(SpeakerTests):
             return 'ok'
         self.assertEqual(speak.reach_phone(attempt), 'ok')
         self.assertEqual(tried, ['100.64.0.9:47811', 'Example-iPhone.local:47811'])
+
+
+# ---- The phone chooses: Claude's voice or the text (phone_voice) ----------------------------
+
+WANTS_TEXT = {'ok': False, 'want': 'text', 'voice': 'text', 'app': 'Sakamoto Voice', 'version': '1.0'}
+
+
+class NoteVoiceTests(Isolated):
+    """phone_voice is kept from every answer the phone gives."""
+
+    def test_the_phone_says(self):
+        for ack, kept in (({'ok': True, 'voice': 'text'}, 'text'), ({'ok': True, 'voice': 'stream'}, 'stream'),
+                          (WANTS_TEXT, 'text'), ({'ok': False, 'want': 'text'}, 'text'),
+                          ({'ok': False, 'error': 'no text', 'voice': 'stream'}, 'stream')):
+            with self.subTest(ack=ack):
+                self.write_config({'phone_voice': 'text' if kept == 'stream' else 'stream'})
+                self.assertEqual(speak.note_voice(ack), kept)
+                self.assertEqual(self.read_config()['phone_voice'], kept)
+
+    def test_an_old_phone_counts_as_stream(self):
+        self.write_config({'phone_voice': 'text'})
+        self.assertEqual(speak.note_voice({'ok': True, 'app': 'Sakamoto Voice', 'version': '0.3.1'}), 'stream')
+        self.assertEqual(self.read_config()['phone_voice'], 'stream')
+
+    def test_refusals_that_do_not_say_change_nothing(self):
+        self.write_config({'phone_voice': 'text'})
+        for ack in ({'ok': False, 'error': 'bad token'}, {}, None, [], {'ok': False, 'voice': 'mp3'}):
+            with self.subTest(ack=ack):
+                self.assertIsNone(speak.note_voice(ack))
+        self.assertEqual(self.read_config()['phone_voice'], 'text')
+
+    def test_unknown_until_the_phone_answers_and_logged_only_on_a_change(self):
+        self.assertEqual(speak.config()['phone_voice'], '')
+        speak.note_voice({'ok': True, 'voice': 'text'})
+        speak.note_voice({'ok': True, 'voice': 'text'})
+        self.assertEqual(self.log_text().count('wants the text'), 1)
+
+
+class PhoneVoiceOverTheWireTests(FakeToolCase):
+    """The answers that set phone_voice, from stand-in phones on the loopback interface."""
+
+    def stub(self, reply):
+        try:
+            phone = ServerStub(reply)
+        except OSError as e:
+            self.skipTest(f'cannot listen here: {e}')
+        self.addCleanup(phone.close)
+        return phone
+
+    def test_a_ping_answer_is_kept(self):
+        phone = self.stub({'ok': True, 'app': 'Sakamoto Voice', 'version': '1.0', 'voice': 'text'})
+        self.write_config({'phone_token': '123456', 'phone': phone.address})
+        self.assertTrue(speak.send_to_phone(speak.message('123456', 'ping'))['ok'])
+        self.assertEqual(self.read_config()['phone_voice'], 'text')
+
+    def test_a_stop_answer_is_kept(self):
+        phone = self.stub({'ok': True, 'app': 'Sakamoto Voice', 'version': '1.0', 'voice': 'stream'})
+        self.write_config({'phone_token': '123456', 'phone': phone.address, 'output': 'app-phone', 'phone_voice': 'text'})
+        speak.stop_phone(speak.config())
+        self.assertEqual(phone.received[0]['kind'], 'stop')
+        self.assertEqual(self.read_config()['phone_voice'], 'stream')
+
+    def test_a_declined_stream_is_kept_and_the_text_is_sent(self):
+        try:
+            phone = StreamPhone(WANTS_TEXT)
+        except OSError as e:
+            self.skipTest(f'cannot listen here: {e}')
+        self.addCleanup(phone.close)
+        sock, ack = speak.open_stream(phone.address, speak.stream_header('123456', 'Hi'))
+        sock.close()
+        self.assertEqual((ack['ok'], ack['want']), (False, 'text'))
+        self.assertEqual(self.read_config()['phone_voice'], 'text')
+
+        # All of app-phone against it: no tap, no click, the text instead.
+        cfg = dict(speak.DEFAULTS, output='app-phone', phone_token='123456', phone=phone.address)
+        self.write_config(cfg)
+        with self.mode('ok'), \
+             mock.patch.object(speak, 'tap_path', return_value=self.tool), \
+             mock.patch.object(speak, 'Tap') as tap, \
+             mock.patch.object(speak, 'app_read') as click, \
+             mock.patch.object(speak, 'deliver_to_phone') as deliver:
+            self.assertIsNone(speak.app_phone(cfg, 'Hello', 'Hello', [('default', 'Hello')], [('en', 'Hello')], set()))
+        tap.assert_not_called()
+        click.assert_not_called()
+        self.assertEqual(deliver.call_args[0][0]['phone_mode'], 'text')
+        self.assertEqual(self.read_config()['phone_voice'], 'text')
+        self.assertIn('app-phone: the phone wants the text, not the stream', self.log_text())
+        self.assertEqual(phone.audio, [])
+
+
+class DeclinedStreamTests(Isolated):
+    """app_phone() when the phone answers the header with "want": "text"."""
+
+    CFG = AppPhoneTests.CFG
+    run_app_phone = AppPhoneTests.run_app_phone
+    assert_text_fallback = AppPhoneTests.assert_text_fallback
+
+    def test_app_phone_sends_the_text(self):
+        tap, _, click, deliver = self.run_app_phone(opened=dict(WANTS_TEXT))
+        self.assertFalse(hasattr(tap, 'path'))           # no tap started
+        click.assert_not_called()
+        self.sock.close.assert_called()
+        self.assert_text_fallback(deliver)
+        self.assertIn('wants the text, not the stream', self.log_text())
+        self.assertNotIn('nothing read aloud', self.log_text())
+
+    def test_app_both_hands_back_before_the_click(self):
+        with mock.patch.object(speak, 'tap_path', return_value='/bin/app-voice-tap'), \
+             mock.patch.object(speak, 'Tap', FakeTap()) as tap, \
+             mock.patch.object(speak, 'reach_phone', return_value=(mock.Mock(), dict(WANTS_TEXT))), \
+             mock.patch.object(speak, 'app_read') as click, \
+             mock.patch.object(speak, 'deliver_to_phone') as deliver:
+            self.write_config(self.CFG)
+            stage = speak.app_phone(self.CFG, 'Hi', 'Hi', [('default', 'Hi')], [('en', 'Hi')], set(), both=True)
+        self.assertEqual(stage, 'before-click')          # the caller: the app's voice here, the text there
+        self.assertFalse(hasattr(tap, 'path'))
+        click.assert_not_called()
+        deliver.assert_not_called()
+
+
+class PhoneVoiceRoutingTests(Isolated):
+    """speak()'s choices for app-phone and app-both, by the remembered phone_voice."""
+
+    run_speaker = SpeakerTests.run_speaker
+
+    def test_app_phone_with_text_remembered_skips_the_stream(self):
+        with mock.patch.object(speak, 'app_phone') as app_phone, mock.patch.object(speak, 'app_read') as click:
+            run, deliver = self.run_speaker({'output': 'app-phone', 'phone_voice': 'text', 'phone_mode': 'audio'})
+        app_phone.assert_not_called()
+        click.assert_not_called()
+        run.assert_not_called()                          # the Mac stays silent
+        cfg, text, runs, _, _ = deliver.call_args[0]
+        self.assertEqual((cfg['phone_mode'], text, runs), ('text', 'Hello 囲碁', [('default', 'Hello'), ('ja', '囲碁')]))
+        self.assertIn('app-phone: the phone wants the text; sending it, no stream', self.log_text())
+
+    def test_app_phone_streams_when_stream_or_unknown(self):
+        for remembered in ('stream', '', None):
+            with self.subTest(phone_voice=remembered), mock.patch.object(speak, 'app_phone') as app_phone:
+                cfg = {'output': 'app-phone'} | ({} if remembered is None else {'phone_voice': remembered})
+                _, deliver = self.run_speaker(cfg)
+            app_phone.assert_called_once()
+            deliver.assert_not_called()
+
+    def test_app_both_with_text_remembered_reads_here_and_sends_the_text(self):
+        with mock.patch.object(speak, 'app_phone') as app_phone, \
+             mock.patch.object(speak, 'app_read', return_value=True) as click:
+            run, deliver = self.run_speaker({'output': 'app-both', 'phone_voice': 'text', 'default_lang': 'en'})
+        app_phone.assert_not_called()                    # no tap, no stream
+        click.assert_called_once()                       # the app's voice on the Mac, unmuted
+        run.assert_not_called()
+        deliver.assert_called_once()                     # the text to the phone
+        self.assertIn("app-both: the phone wants the text; the app's voice here", self.log_text())
+
+    def test_app_both_with_text_remembered_and_the_debugger_off(self):
+        with mock.patch.object(speak, 'app_phone') as app_phone, \
+             mock.patch.object(speak, 'app_read', return_value=False):
+            run, deliver = self.run_speaker({'output': 'app-both', 'phone_voice': 'text', 'default_lang': 'en'})
+        app_phone.assert_not_called()
+        self.assertEqual(run.call_count, 2)              # the Mac's own voices
+        deliver.assert_called_once()
+
+    def test_app_both_streams_when_stream_remembered(self):
+        with mock.patch.object(speak, 'app_phone', return_value=None) as app_phone:
+            run, deliver = self.run_speaker({'output': 'app-both', 'phone_voice': 'stream', 'default_lang': 'en'})
+        self.assertTrue(app_phone.call_args.kwargs['both'])
+        run.assert_not_called()
+        deliver.assert_not_called()
+
+    def test_other_outputs_ignore_it(self):
+        run, deliver = self.run_speaker({'output': 'both', 'phone_voice': 'text', 'default_lang': 'en'})
+        self.assertEqual(run.call_count, 2)
+        deliver.assert_called_once()

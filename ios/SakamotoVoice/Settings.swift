@@ -33,6 +33,9 @@ final class Settings {
     var scheduleEnd: Int { didSet { defaults.set(scheduleEnd, forKey: Key.scheduleEnd) } }
     /// Keep the screen from sleeping while the app is open (the stand).
     var keepScreenOn: Bool { didSet { defaults.set(keepScreenOn, forKey: Key.keepScreenOn) } }
+    /// Claude's Voice: take the Claude app's voice streamed from the Mac, or have the Mac send only
+    /// the text (always, or on cellular data, the default).
+    var voicePolicy: VoicePolicy { didSet { defaults.set(voicePolicy.rawValue, forKey: Key.voicePolicy) } }
 
     enum Key {
         static let pairingCode = "pairingCode"
@@ -45,6 +48,7 @@ final class Settings {
         static let scheduleStart = "scheduleStart"
         static let scheduleEnd = "scheduleEnd"
         static let keepScreenOn = "keepScreenOn"
+        static let voicePolicy = "voicePolicy"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -57,6 +61,7 @@ final class Settings {
             Key.scheduleStart: 7 * 60,
             Key.scheduleEnd: 23 * 60,
             Key.keepScreenOn: true,
+            Key.voicePolicy: VoicePolicy.default.rawValue,
         ])
         var code = defaults.string(forKey: Key.pairingCode) ?? ""
         if !PairingCode.isValid(code) {
@@ -73,6 +78,7 @@ final class Settings {
         scheduleStart = defaults.integer(forKey: Key.scheduleStart)
         scheduleEnd = defaults.integer(forKey: Key.scheduleEnd)
         keepScreenOn = defaults.bool(forKey: Key.keepScreenOn)
+        voicePolicy = VoicePolicy(rawValue: defaults.string(forKey: Key.voicePolicy) ?? "") ?? .default
     }
 
     var schedule: DailySchedule {

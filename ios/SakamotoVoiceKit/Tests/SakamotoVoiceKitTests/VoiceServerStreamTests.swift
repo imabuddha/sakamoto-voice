@@ -77,9 +77,11 @@ final class StreamClient: @unchecked Sendable {
     let network = VoiceServerNetworkTests()
 
     func server(_ inbox: Inbox, connectionTimeout: TimeInterval = 30,
-                idle: TimeInterval = VoiceProtocol.streamIdleTimeout) -> VoiceServer {
+                idle: TimeInterval = VoiceProtocol.streamIdleTimeout,
+                preference: VoicePreference = VoicePreference(policy: .stream)) -> VoiceServer {
         VoiceServer(token: "123456", version: "t", advertise: false, preferredPort: nil,
-                    connectionTimeout: connectionTimeout, streamIdleTimeout: idle) { inbox.add($0) }
+                    connectionTimeout: connectionTimeout, streamIdleTimeout: idle,
+                    voice: { preference.want }) { inbox.add($0) }
     }
 
     func waitUntil(_ condition: () -> Bool) async {
@@ -105,6 +107,7 @@ final class StreamClient: @unchecked Sendable {
         try await client.send(VoiceMessage.streamHeader(token: "123 456", text: "Hello 囲碁"))
         let ack = try JSONDecoder().decode(Ack.self, from: try await client.readLine())
         #expect(ack.ok)
+        #expect(ack.voice == .stream && ack.want == nil)
         #expect(inbox.all.first == .streamStart(StreamInfo(id: 1, sampleRate: 24_000, channels: 1, text: "Hello 囲碁")))
 
         // In odd-sized pieces, which split samples, then the sender closes its side.
@@ -150,6 +153,67 @@ final class StreamClient: @unchecked Sendable {
         #expect(ack.error == "bad token")
         #expect(await client.waitForClose())
         #expect(inbox.all.isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func aPhoneThatWantsTextDeclinesTheStream() async throws {
+        let inbox = Inbox()
+        let preference = VoicePreference(policy: .textOnCellular, onCellular: true)
+        let server = server(inbox, preference: preference)
+        defer { server.stop() }
+        let port = try await network.waitForPort(server)
+        let client = StreamClient(port: port)
+        try await client.send(VoiceMessage.streamHeader(token: "123456", text: "Hello"))
+        let ack = try JSONDecoder().decode(Ack.self, from: try await client.readLine())
+        #expect(ack == .wantsText(version: "t"))
+        #expect(!ack.ok && ack.error == nil && ack.want == .text && ack.voice == .text)
+        #expect(await client.waitForClose())
+        #expect(inbox.all.isEmpty)                          // nothing started, nothing shown
+
+        // The text the Mac sends instead is taken, and the answer says the same.
+        let reply = try await network.send(Data(#"{"token": "123456", "kind": "text", "text": "Hello"}"#.utf8), port: port)
+        #expect(try JSONDecoder().decode(Ack.self, from: reply) == .success(version: "t", voice: .text))
+        #expect(inbox.all == [.text("Hello", runs: [LangRun(lang: "default", text: "Hello")])])
+
+        // Back on Wi-Fi, the next stream is accepted.
+        preference.onCellular = false
+        let again = StreamClient(port: port)
+        try await again.send(VoiceMessage.streamHeader(token: "123456"))
+        #expect(try JSONDecoder().decode(Ack.self, from: try await again.readLine()) == .success(version: "t", voice: .stream))
+        await waitUntil { inbox.all.count == 2 }
+        #expect(inbox.all.last == .streamStart(StreamInfo(id: 1, sampleRate: 24_000, channels: 1, text: "")))
+    }
+
+    @Test(.timeLimit(.minutes(1))) func aDeclinedStreamLeavesThePlayingOneAlone() async throws {
+        let inbox = Inbox()
+        let preference = VoicePreference(policy: .stream)
+        let server = server(inbox, preference: preference)
+        defer { server.stop() }
+        let port = try await network.waitForPort(server)
+        let first = StreamClient(port: port)
+        try await first.send(VoiceMessage.streamHeader(token: "123456"))
+        #expect(try JSONDecoder().decode(Ack.self, from: try await first.readLine()).ok)
+
+        preference.policy = .textOnly
+        let second = StreamClient(port: port)
+        try await second.send(VoiceMessage.streamHeader(token: "123456"))
+        #expect(try JSONDecoder().decode(Ack.self, from: try await second.readLine()).want == .text)
+        #expect(await second.waitForClose())
+
+        try await first.send(sine.prefix(4_800), final: true)
+        #expect(await first.waitForClose())
+        await waitUntil { inbox.all.last == .streamEnd(id: 1) }
+        #expect(audio(in: inbox, id: 1).count == 4_800)
+        #expect(inbox.all.last == .streamEnd(id: 1))
+    }
+
+    @Test(.timeLimit(.minutes(1))) func aBadTokenOnAStreamSaysNothingOfThePreference() async throws {
+        let inbox = Inbox()
+        let server = server(inbox, preference: VoicePreference(policy: .textOnly))
+        defer { server.stop() }
+        let port = try await network.waitForPort(server)
+        let client = StreamClient(port: port)
+        try await client.send(VoiceMessage.streamHeader(token: "654321"))
+        #expect(try JSONDecoder().decode(Ack.self, from: try await client.readLine()) == .failure(.badToken, version: "t"))
     }
 
     @Test(.timeLimit(.minutes(1))) func aStopEndsTheStreamAndAPingDoesNot() async throws {

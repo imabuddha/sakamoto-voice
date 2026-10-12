@@ -32,6 +32,20 @@ import Foundation
 /// kind "stream" is a stream; anything else is read whole as before (so a one-line message with a
 /// newline after it is still an ordinary message). Phones before 0.3.0 never answer a stream's
 /// header (they wait for the sender to close), so the sender gives up on them.
+///
+/// **Voice or text** (1.0). Only the Mac opens connections, so the phone states what it wants in
+/// its answers: every answer to a message with the right pairing code carries `"voice"`, either
+/// "stream" (stream the Claude app's voice when you can) or "text" (send only the text, to save
+/// mobile data), from the phone's Claude's Voice setting and its network path at that moment.
+/// Answers that refuse the code (or a message that couldn't be read) don't say. A stream's header
+/// that arrives while the phone wants text is declined, which isn't an error: the answer has
+/// `"ok": false`, no `error`, and `"want": "text"`, the phone closes the connection, and the
+/// sender sends the text instead (an ordinary text message, on a new connection):
+///
+///     {"app":"Sakamoto Voice","ok":true,"version":"1.0","voice":"stream"}
+///     {"app":"Sakamoto Voice","ok":false,"version":"1.0","voice":"text","want":"text"}
+///
+/// Phones before 1.0 never send `voice`; a sender treats their answers as "stream".
 public enum VoiceProtocol {
     public static let serviceType = "_sakamotovoice._tcp"
     /// The port the phone asks for first, so a cached "host:port" on the Mac survives restarts;
@@ -176,19 +190,47 @@ public enum MessageError: Error, Equatable, Sendable {
     }
 }
 
+/// What the phone wants from the Mac for the Claude app's voice, as it says in its answers
+/// (`"voice"`, and a declined stream's `"want"`).
+public enum VoiceWant: String, Codable, Sendable {
+    /// Stream the Claude app's voice when it's offered.
+    case stream
+    /// Send only the text (the phone reads it in its own voices).
+    case text
+}
+
 /// The phone's answer: one JSON line.
 public struct Ack: Codable, Equatable, Sendable {
     public var ok: Bool
     public var error: String?
     public var app: String
     public var version: String
+    /// What the phone wants now (1.0 and later; nil when the pairing code was refused).
+    public var voice: VoiceWant?
+    /// Set when a stream's header is declined because the phone wants the text instead.
+    public var want: VoiceWant?
 
-    public static func success(version: String) -> Ack {
-        Ack(ok: true, error: nil, app: VoiceProtocol.appName, version: version)
+    public init(ok: Bool, error: String? = nil, app: String = VoiceProtocol.appName, version: String,
+                voice: VoiceWant? = nil, want: VoiceWant? = nil) {
+        self.ok = ok
+        self.error = error
+        self.app = app
+        self.version = version
+        self.voice = voice
+        self.want = want
     }
 
-    public static func failure(_ error: MessageError, version: String) -> Ack {
-        Ack(ok: false, error: error.code, app: VoiceProtocol.appName, version: version)
+    public static func success(version: String, voice: VoiceWant? = nil) -> Ack {
+        Ack(ok: true, version: version, voice: voice)
+    }
+
+    public static func failure(_ error: MessageError, version: String, voice: VoiceWant? = nil) -> Ack {
+        Ack(ok: false, error: error.code, version: version, voice: voice)
+    }
+
+    /// A stream's header declined, not an error: the phone wants the text instead.
+    public static func wantsText(version: String) -> Ack {
+        Ack(ok: false, version: version, voice: .text, want: .text)
     }
 
     public func encoded() -> Data {

@@ -1,4 +1,5 @@
 import AVFoundation
+import Network
 import Observation
 import SakamotoVoiceKit
 import SwiftUI
@@ -21,7 +22,7 @@ struct ShownMessage: Identifiable, Equatable {
     let source: Source
 }
 
-/// Ties the receiver, the speaker, the keep-alive, and the settings together.
+/// Ties the receiver, the speaker, the keep-alive, the network path, and the settings together.
 @MainActor @Observable
 final class AppModel {
     static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
@@ -30,6 +31,8 @@ final class AppModel {
     let settings = Settings()
     let speaker = Speaker()
     let keepAlive = KeepAlive()
+    /// Claude's Voice and the network path, for the receiver's answers (read on its queue).
+    let voicePreference = VoicePreference()
 
     /// Newest first.
     private(set) var messages: [ShownMessage] = []
@@ -37,6 +40,8 @@ final class AppModel {
     /// When a ping last arrived (the Mac pairing or testing).
     private(set) var lastPing: Date?
     private(set) var isActive = true
+    /// Whether the phone's network path is cellular or otherwise expensive; nil until known.
+    private(set) var onCellular: Bool?
 
     @ObservationIgnored private var server: VoiceServer!
     @ObservationIgnored private var last: Incoming?
@@ -46,11 +51,15 @@ final class AppModel {
     /// audio, so a stream that brings none, followed by the text, doesn't show it twice).
     @ObservationIgnored private var stream: StreamInfo?
     @ObservationIgnored private var streamShown = false
+    @ObservationIgnored private let pathMonitor = NWPathMonitor()
 
     init() {
         KeepAlive.configureSession()
-        // In order, on the main queue: a stream's audio must follow its start.
-        server = VoiceServer(token: settings.pairingCode, version: Self.version) { [weak self] incoming in
+        voicePreference.policy = settings.voicePolicy
+        // In order, on the main queue: a stream's audio must follow its start. Each answer says
+        // what the phone wants now (the setting and the path as they are when it answers).
+        server = VoiceServer(token: settings.pairingCode, version: Self.version,
+                             voice: { [voicePreference] in voicePreference.want }) { [weak self] incoming in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.receive(incoming) }
             }
@@ -66,6 +75,7 @@ final class AppModel {
             }
         }
         server.start()
+        watchThePath()
         evaluateKeepAlive()
         // Re-check the schedule every half minute (a timer runs in the background while awake).
         scheduleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -152,6 +162,36 @@ final class AppModel {
         let text = "Good heavens, Miss Sakamoto, you can talk! そうやで。"
         stream = nil
         perform(.text(text, runs: LanguageSplitter.runs(in: text, other: LangRun.phoneDefault)))
+    }
+
+    // MARK: - Claude's voice or the text
+
+    /// What the phone tells the Mac it wants now.
+    var voiceWant: VoiceWant { settings.voicePolicy.want(onCellular: onCellular ?? false) }
+
+    func voicePolicyChanged() {
+        voicePreference.policy = settings.voicePolicy
+    }
+
+    /// Follows the network path (the system's default route), so that "Text on Cellular" asks for
+    /// the text while the phone is on cellular data.
+    private func watchThePath() {
+        pathMonitor.pathUpdateHandler = { [weak self, voicePreference] path in
+            let cellular = Self.isCellular(path)
+            voicePreference.onCellular = cellular           // at once, for the receiver's next answer
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.onCellular = cellular }
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "com.pragmaphilia.SakamotoVoice.path"))
+    }
+
+    /// Cellular data, or another path iOS counts as expensive (a Personal Hotspot, say). Through a
+    /// VPN such as Tailscale, the path runs over the tunnel's interface, which iOS marks with the
+    /// cost and type of the interface the tunnel itself runs over, so a phone on cellular data
+    /// still counts as cellular (expected from Network.framework's design; see README.md).
+    nonisolated static func isCellular(_ path: NWPath) -> Bool {
+        path.isExpensive || path.usesInterfaceType(.cellular)
     }
 
     // MARK: - Pairing

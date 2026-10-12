@@ -14,6 +14,7 @@ struct SettingsView: View {
             Form {
                 pairing
                 voices(settings)
+                claudesVoice(settings)
                 stayingAwake(settings)
                 Section {
                     Toggle("Keep Screen On", isOn: $settings.keepScreenOn)
@@ -31,6 +32,7 @@ struct SettingsView: View {
             }
             .onChange(of: settings.keepAlivePolicy) { model.evaluateKeepAlive() }
             .onChange(of: settings.keepScreenOn) { model.evaluateKeepAlive() }
+            .onChange(of: settings.voicePolicy) { model.voicePolicyChanged() }
         }
     }
 
@@ -107,6 +109,39 @@ struct SettingsView: View {
                 Mac sends (phone_mode "audio") is in the Mac's own voice instead.
                 """)
         }
+    }
+
+    private func claudesVoice(_ settings: Settings) -> some View {
+        @Bindable var settings = settings
+        return Section {
+            Picker("Claude's Voice", selection: $settings.voicePolicy) {
+                Text("Claude's Voice").tag(VoicePolicy.stream)
+                Text("Text on Cellular").tag(VoicePolicy.textOnCellular)
+                Text("Text Only").tag(VoicePolicy.textOnly)
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } header: {
+            Text("Claude's Voice")
+        } footer: {
+            Text(voiceFooter)
+        }
+    }
+
+    private var voiceFooter: String {
+        var text = """
+            When the Mac streams the Claude app's own voice (output app-phone or app-both), it uses \
+            about 170 MB of data an hour. With Text on Cellular, the voice is streamed on Wi-Fi, and \
+            on cellular data (or a Personal Hotspot) the Mac sends only the text, which the phone \
+            reads in its own voices. The Mac learns the choice from the phone's answers, so a change \
+            can take one more response to reach it.
+            """
+        if let onCellular = model.onCellular {
+            let network = onCellular ? "On cellular data" : "On Wi-Fi"
+            text += model.voiceWant == .stream ? " \(network) now: the voice is streamed."
+                : " \(network) now: the Mac sends the text."
+        }
+        return text
     }
 
     private func stayingAwake(_ settings: Settings) -> some View {

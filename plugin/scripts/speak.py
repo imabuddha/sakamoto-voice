@@ -10,7 +10,7 @@ PATH as README.md describes):
   speak.py on|off|stop|status|test ["text"]
                            the switch: on and off persist; stop silences the current response.
   speak.py pair CODE       pairs with the phone: stores its 6-digit code and finds it on the network.
-  speak.py output mac|phone|both|app|app-phone
+  speak.py output mac|phone|both|app|app-both|app-phone
                            where responses are spoken.
   speak.py phone-mode text|audio
                            what the phone gets: text, spoken in its own voices, or audio rendered
@@ -44,6 +44,9 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
             and this script streams it to the phone, which also shows the text. When the debugger
             is off, the tool isn't built, or no sound comes, the phone gets the text instead (its
             own voices).
+            In both, the phone has the last word (its Claude's Voice setting, 1.0 and later): while
+            it wants the text (phone_voice), the Mac sends the text and streams nothing, and
+            app-both has the app read on the Mac alone.
   app_voice_tap  where app-voice-tap is, when it's not in ~/.local/bin or on the PATH.
   phone_remote  another address for the phone, tried first: e.g. its Tailscale address
             ("100.x.y.z:47811"), so the phone is reached away from home too; when it fails, the
@@ -56,6 +59,9 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
   phone_token the phone's 6-digit pairing code (speak.py pair sets it).
   phone     the phone's "host:port", found with Bonjour (dns-sd) and kept here; found again when a
             send fails. phone_name is its Bonjour name.
+  phone_voice  what the phone last said it wants for the Claude app's voice: "stream" or "text"
+            (to save mobile data); kept from every answer it gives, empty until it has answered.
+            A phone app older than 1.0 never says, and counts as "stream".
 Voice markers in a response switch voices: 〔en〕 to voice_en and 〔ja〕 to voice_ja, from the marker
 to the next one or to the end of its paragraph (a blank line), where the default voice resumes.
 Markers are never spoken or shown; unknown ones, such as 〔xx〕, are dropped. They hold on the phone
@@ -80,10 +86,11 @@ LOG_MAX = 64 * 1024          # then speak.log becomes speak.log.1, replacing the
 DEFAULTS = {'enabled': True, 'voice_en': '', 'voice_ja': 'Kyoko', 'default_lang': 'auto', 'rate': 0,
             'device': '', 'max_chars': 6000,
             'output': 'mac', 'phone_mode': 'text', 'phone_token': '', 'phone': '', 'phone_name': '',
-            'app_voice_tap': '', 'dev_path': '', 'phone_remote': ''}
+            'app_voice_tap': '', 'dev_path': '', 'phone_remote': '', 'phone_voice': ''}
 OUTPUTS = ('mac', 'phone', 'both', 'app', 'app-both', 'app-phone')
 PHONE_OUTPUTS = ('phone', 'both', 'app-both', 'app-phone')       # the outputs a stop also tells the phone
 PHONE_MODES = ('text', 'audio')
+PHONE_VOICES = ('stream', 'text')     # what the phone wants for the Claude app's voice (phone_voice)
 
 
 def config():
@@ -306,7 +313,9 @@ def prepare(text, cfg):
 # The Sakamoto Voice app listens for one JSON message per TCP connection (the sender writes it and
 # closes its side) and answers with one JSON line, {"ok": true, ...} or {"ok": false, "error": ...};
 # see ios/SakamotoVoiceKit/Sources/SakamotoVoiceKit/Message.swift. It advertises itself with
-# Bonjour, which macOS's dns-sd browses and resolves without any Python packages.
+# Bonjour, which macOS's dns-sd browses and resolves without any Python packages. From 1.0 each
+# answer to a message with the right code also says what the phone wants for the Claude app's
+# voice, "voice": "stream" or "text", which note_voice() keeps as phone_voice.
 
 SERVICE = '_sakamotovoice._tcp'
 
@@ -406,9 +415,28 @@ def message(token, kind, text='', runs=None, audio=None, fmt='m4a'):
     return json.dumps(msg, ensure_ascii=False).encode('utf-8')
 
 
+def note_voice(ack):
+    """Keeps what the phone says it wants for the Claude app's voice (phone_voice), from any of its
+    answers: "stream" or "text". A phone app older than 1.0 never says; its accepting answers
+    count as "stream". Refusals that don't say (a wrong code, say) change nothing. Returns what
+    is kept now."""
+    if not isinstance(ack, dict):
+        return None
+    voice = ack.get('voice') or ack.get('want')
+    if voice not in PHONE_VOICES:
+        if not ack.get('ok'):
+            return None
+        voice = 'stream'
+    if config().get('phone_voice') != voice:
+        remember(phone_voice=voice)
+        log(f'phone: wants {"the text" if voice == "text" else "the stream"} for the Claude app\'s voice now')
+    return voice
+
+
 def exchange(address, payload, timeout=10.0):
-    """Sends one message and returns the phone's answer (a dict). Raises OSError when the phone
-    can't be reached and ValueError when its answer isn't JSON."""
+    """Sends one message and returns the phone's answer (a dict), keeping what it says it wants
+    (note_voice). Raises OSError when the phone can't be reached and ValueError when its answer
+    isn't JSON."""
     host, port = split_address(address)
     with socket.create_connection((host, port), timeout=min(timeout, 4.0)) as sock:
         sock.settimeout(timeout)
@@ -417,7 +445,9 @@ def exchange(address, payload, timeout=10.0):
         reply = b''
         while chunk := sock.recv(4096):
             reply += chunk
-    return json.loads(reply.decode('utf-8') or 'null') or {}
+    ack = json.loads(reply.decode('utf-8') or 'null') or {}
+    note_voice(ack)
+    return ack
 
 
 def find_phone(token, browse_seconds=2.0):
@@ -654,8 +684,10 @@ def stream_header(token, text='', rate=STREAM_RATE):
 
 def open_stream(address, header, timeout=STREAM_ANSWER_TIMEOUT):
     """Connects to the phone and sends a stream's header. Returns (the socket, the phone's answer:
-    a dict, or None when it didn't answer in time, as phones before 0.3.0 don't). Raises OSError
-    when the phone can't be reached and ValueError when its answer isn't JSON."""
+    a dict, or None when it didn't answer in time, as phones before 0.3.0 don't), keeping what it
+    says it wants (note_voice). A phone that wants the text declines the stream with
+    {"ok": false, "want": "text"}, which isn't an error. Raises OSError when the phone can't be
+    reached and ValueError when its answer isn't JSON."""
     host, port = split_address(address)
     sock = socket.create_connection((host, port), timeout=timeout)
     try:
@@ -673,6 +705,7 @@ def open_stream(address, header, timeout=STREAM_ANSWER_TIMEOUT):
         ack = json.loads(line.split(b'\n', 1)[0].decode('utf-8') or 'null') or {}
         if not isinstance(ack, dict):
             raise ValueError(f'not an answer: {line[:80]!r}')
+        note_voice(ack)
         sock.settimeout(STREAM_SEND_TIMEOUT)
         return sock, ack
     except BaseException:
@@ -814,7 +847,11 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
 
     both (output app-both): the Mac isn't muted, so the voice plays here and on the phone. Then a
     failure doesn't fall back here; it returns where things stopped, for the caller to choose:
-    'before-click' (nothing pressed yet), 'not-clicked', or 'no-sound'. None when it streamed."""
+    'before-click' (nothing pressed yet), 'not-clicked', or 'no-sound'. None when it streamed.
+
+    A phone that wants the text (its Claude's Voice setting) declines the stream; that's kept as
+    phone_voice (open_stream), so the next response doesn't try, and this one's text is sent
+    (for app-both, 'before-click': the app's voice on the Mac, the text to the phone)."""
     def fallback(reason, stage='before-click'):
         if both:
             log(f'app-both: {reason}')
@@ -841,6 +878,8 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
         return fallback("the phone didn't answer the stream (is its app 0.3.0 or later?)")
     if not ack.get('ok'):
         sock.close()
+        if ack.get('want') == 'text':
+            return fallback('the phone wants the text, not the stream (its Claude\'s Voice setting)')
         log(f'app-phone: the phone refused the stream ({ack.get("error")})' + ('' if both else '; nothing read aloud'))
         return 'before-click' if both else None
     try:
@@ -922,13 +961,20 @@ def speak(path, prompted=True):
         output = None if app_read(raw, APP_READ_DELAY) else 'mac'   # the app's own voice, else the Mac's
     elif output == 'app-both':
         # The app's voice here and streamed to the phone; failing that, as much of it as can be had.
-        stage = app_phone(cfg, raw, text, phone_runs, chunks, voices, both=True) if chunks else 'before-click'
+        if cfg.get('phone_voice') == 'text':
+            log("app-both: the phone wants the text; the app's voice here, the text there, no stream")
+            stage = 'before-click'
+        else:
+            stage = app_phone(cfg, raw, text, phone_runs, chunks, voices, both=True) if chunks else 'before-click'
         if stage == 'before-click':     # the app's voice here, the text to the phone
             output = 'phone' if app_read(raw, APP_READ_DELAY) else 'both'
         else:                           # the app didn't speak: the Mac's voices and the text
             output = 'both' if stage else None
     elif output == 'app-phone':
-        if chunks:
+        if chunks and cfg.get('phone_voice') == 'text':
+            log('app-phone: the phone wants the text; sending it, no stream')
+            deliver_to_phone(dict(cfg, phone_mode='text'), text, phone_runs, chunks, voices)
+        elif chunks:
             app_phone(cfg, raw, text, phone_runs, chunks, voices)   # the app's voice on the phone, else text there
         output = None
     phone = None

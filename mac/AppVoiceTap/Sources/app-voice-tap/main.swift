@@ -203,6 +203,9 @@ final class Streamer {
                 return finish(Exit.phone, "the phone at \(address) didn't answer properly")
             }
             guard ack.ok else {
+                if ack.want == .text {
+                    return finish(Exit.phone, "the phone at \(address) wants the text, not the stream (its Claude's Voice setting)")
+                }
                 return finish(Exit.phone, "the phone at \(address) refused the stream: \(ack.error ?? "?")")
             }
             note("the phone (\(ack.app) \(ack.version)) accepted the stream")

@@ -20,7 +20,7 @@ final class Inbox: @unchecked Sendable {
         let inbox = Inbox()
         let server = VoiceServer(token: "123456", version: "t", advertise: false) { inbox.add($0) }
         let ack = server.handle(Data(#"{"token": "123 456", "kind": "text", "text": "Hi"}"#.utf8))
-        #expect(ack == .success(version: "t"))
+        #expect(ack == .success(version: "t", voice: .stream))
         #expect(inbox.all == [.text("Hi", runs: [LangRun(lang: "default", text: "Hi")])])
     }
 
@@ -31,6 +31,28 @@ final class Inbox: @unchecked Sendable {
         #expect(server.handle(Data(#"{"token": "654321", "kind": "ping"}"#.utf8)).error == "bad token")
         #expect(server.handle(Data(#"{"token": "123456", "kind": "text", "text": ""}"#.utf8)).error == "no text")
         #expect(inbox.all.isEmpty)
+    }
+
+    @Test func answersSayWhatThePhoneWantsOnceTheCodeIsAccepted() {
+        let preference = VoicePreference(policy: .stream)
+        let server = VoiceServer(token: "123456", version: "t", advertise: false,
+                                 voice: { preference.want }) { _ in }
+        let ping = Data(#"{"token": "123456", "kind": "ping"}"#.utf8)
+        #expect(server.handle(ping) == .success(version: "t", voice: .stream))
+        preference.policy = .textOnly
+        #expect(server.handle(ping) == .success(version: "t", voice: .text))     // asked as it answers
+        #expect(server.handle(Data(#"{"token": "123456", "kind": "stop"}"#.utf8)).voice == .text)
+        #expect(server.handle(Data(#"{"token": "123456", "kind": "text", "text": "Hi"}"#.utf8)).voice == .text)
+        #expect(server.handle(Data(#"{"token": "123456", "kind": "text", "text": ""}"#.utf8))
+                == .failure(.noText, version: "t", voice: .text))
+        // Not to a stranger, nor to what can't be read.
+        #expect(server.handle(Data(#"{"token": "654321", "kind": "ping"}"#.utf8)) == .failure(.badToken, version: "t"))
+        #expect(server.handle(Data("nope".utf8)) == .failure(.malformed, version: "t"))
+    }
+
+    @Test func withoutAPreferenceThePhoneWantsTheStream() {
+        let server = VoiceServer(token: "123456", version: "t", advertise: false) { _ in }
+        #expect(server.handle(Data(#"{"token": "123456", "kind": "ping"}"#.utf8)).voice == .stream)
     }
 
     @Test func locksOutAGuesser() {

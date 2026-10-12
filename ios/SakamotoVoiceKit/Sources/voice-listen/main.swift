@@ -2,10 +2,11 @@
 // app and prints what arrives, so the Mac side (speak.py pair, phone-test, output phone,
 // app-voice-tap) can be tried without a phone.
 //
-//     swift run voice-listen [code] [--save DIR]
+//     swift run voice-listen [code] [--save DIR] [--text]
 //
 // The code is 6 digits (a random one if none is given). With --save, each stream is also written
-// to DIR as a WAV file, to hear what the phone would have played.
+// to DIR as a WAV file, to hear what the phone would have played. With --text, it answers as a
+// phone that wants the text, not the Claude app's voice (as on cellular data): it declines streams.
 
 import Foundation
 import SakamotoVoiceKit
@@ -17,6 +18,8 @@ if let i = arguments.firstIndex(of: "--save"), i + 1 < arguments.count {
     saveDirectory = URL(fileURLWithPath: arguments[i + 1], isDirectory: true)
     arguments.removeSubrange(i...(i + 1))
 }
+let wantsText = arguments.contains("--text")
+arguments.removeAll { $0 == "--text" }
 let code = arguments.first.map(PairingCode.normalize) ?? PairingCode.generate()
 guard PairingCode.isValid(code) else {
     FileHandle.standardError.write(Data("voice-listen: the code must be 6 digits\n".utf8))
@@ -38,8 +41,10 @@ final class StreamLog: @unchecked Sendable {
 let current = StreamLog()
 let save = saveDirectory
 
-print("voice-listen: pairing code \(PairingCode.display(code)) (on the Mac: speak.py pair \(code))")
-let server = VoiceServer(token: code, version: "voice-listen", serviceName: "voice-listen on \(ProcessInfo.processInfo.hostName)") { incoming in
+print("voice-listen: pairing code \(PairingCode.display(code)) (on the Mac: speak.py pair \(code))"
+      + (wantsText ? "; wants the text, declining streams" : ""))
+let server = VoiceServer(token: code, version: "voice-listen", serviceName: "voice-listen on \(ProcessInfo.processInfo.hostName)",
+                         voice: { wantsText ? .text : .stream }) { incoming in
     switch incoming {
     case .text(let text, let runs):
         print("\(stamp()) text, \(runs.count) runs:")

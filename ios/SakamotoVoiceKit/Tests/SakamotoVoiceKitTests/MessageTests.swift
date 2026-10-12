@@ -98,6 +98,27 @@ import Testing
         #expect(ok.ok && ok.error == nil)
     }
 
+    @Test func ackSaysWhatThePhoneWants() throws {
+        let data = Ack.success(version: "1.0", voice: .stream).encoded()
+        #expect(String(decoding: data, as: UTF8.self)
+                == #"{"app":"Sakamoto Voice","ok":true,"version":"1.0","voice":"stream"}"# + "\n")
+        let text = try JSONDecoder().decode(Ack.self, from: Ack.success(version: "1.0", voice: .text).encoded())
+        #expect(text.voice == .text && text.want == nil)
+    }
+
+    @Test func aDeclinedStreamIsNotAnError() throws {
+        let data = Ack.wantsText(version: "1.0").encoded()
+        #expect(String(decoding: data, as: UTF8.self)
+                == #"{"app":"Sakamoto Voice","ok":false,"version":"1.0","voice":"text","want":"text"}"# + "\n")
+        let ack = try JSONDecoder().decode(Ack.self, from: data)
+        #expect(!ack.ok && ack.error == nil && ack.want == .text)
+    }
+
+    @Test func anOldPhonesAckHasNoVoice() throws {
+        let ack = try JSONDecoder().decode(Ack.self, from: Data(#"{"app":"Sakamoto Voice","ok":true,"version":"0.3.1"}"#.utf8))
+        #expect(ack.ok && ack.voice == nil && ack.want == nil)
+    }
+
     @Test(arguments: [false, true])
     func explicitRunsIgnoreThePhonesDefault(defaultIsJapanese: Bool) {
         #expect(LangRun(lang: "ja", text: "").isJapanese(byDefault: defaultIsJapanese))

@@ -5,7 +5,9 @@ import Network
 /// (read until the sender closes its side), which is checked against the pairing code and
 /// answered with an `Ack`, or a stream: a header line, answered at once, then live audio until
 /// the sender closes (see `VoiceProtocol`). Accepted messages, and a stream's start, audio, and
-/// end, go to `handler` in order, on the server's own queue.
+/// end, go to `handler` in order, on the server's own queue. Each answer to a message with the
+/// right pairing code says what the phone wants (`voice`, called as it answers); while that is
+/// text, a stream's header is declined (`Ack.wantsText`).
 public final class VoiceServer: @unchecked Sendable {
     public enum State: Equatable, Sendable {
         case stopped
@@ -24,6 +26,7 @@ public final class VoiceServer: @unchecked Sendable {
     private let preferredPort: UInt16?
     private let connectionTimeout: TimeInterval
     private let streamIdleTimeout: TimeInterval
+    private let voice: @Sendable () -> VoiceWant
 
     // The rest is touched only on `queue`.
     private var listener: NWListener?
@@ -42,9 +45,12 @@ public final class VoiceServer: @unchecked Sendable {
     ///   - preferredPort: the port to ask for first; nil for any.
     ///   - connectionTimeout: how long a message may take to arrive.
     ///   - streamIdleTimeout: how long a stream may go without sending anything.
+    ///   - voice: what the phone wants now, asked each time it answers (called on the server's
+    ///     queue, so it must be quick and thread-safe).
     public init(token: String, version: String, advertise: Bool = true, serviceName: String? = nil,
                 preferredPort: UInt16? = VoiceProtocol.preferredPort, connectionTimeout: TimeInterval = 30,
                 streamIdleTimeout: TimeInterval = VoiceProtocol.streamIdleTimeout,
+                voice: @escaping @Sendable () -> VoiceWant = { .stream },
                 handler: @escaping Handler) {
         self.token = token
         self.version = version
@@ -53,6 +59,7 @@ public final class VoiceServer: @unchecked Sendable {
         self.preferredPort = preferredPort
         self.connectionTimeout = connectionTimeout
         self.streamIdleTimeout = streamIdleTimeout
+        self.voice = voice
         self.handler = handler
     }
 
@@ -256,19 +263,32 @@ public final class VoiceServer: @unchecked Sendable {
         }
     }
 
-    /// Checks a stream's header and answers it at once; the audio follows.
+    /// Checks a stream's header and answers it at once; the audio follows. While the phone wants
+    /// the text, the header is declined instead (and the stream playing now, if any, goes on).
     private func startStream(_ message: VoiceMessage, rest: Data, _ inbound: Inbound, now: Date = Date()) {
+        switch gate.check(message.token, expected: token, now: now) {
+        case .accepted: break
+        case .rejected:
+            inbound.finished = true
+            reply(on: inbound.connection, .failure(.badToken, version: version))
+            return
+        case .lockedOut:
+            inbound.finished = true
+            reply(on: inbound.connection, .failure(.lockedOut, version: version))
+            return
+        }
+        let voice = voice()
         var info: StreamInfo
         do {
-            switch gate.check(message.token, expected: token, now: now) {
-            case .accepted: break
-            case .rejected: throw MessageError.badToken
-            case .lockedOut: throw MessageError.lockedOut
-            }
             info = try MessageDecoder.validateStream(message)
         } catch {
             inbound.finished = true
-            reply(on: inbound.connection, .failure((error as? MessageError) ?? .malformed, version: version))
+            reply(on: inbound.connection, .failure(error, version: version, voice: voice))
+            return
+        }
+        guard voice == .stream else {
+            inbound.finished = true
+            reply(on: inbound.connection, .wantsText(version: version))
             return
         }
         endActiveStream()
@@ -278,7 +298,8 @@ public final class VoiceServer: @unchecked Sendable {
         inbound.framer = PCMFramer(bytesPerFrame: info.bytesPerFrame)
         activeStream = inbound
         handler(.streamStart(info))
-        inbound.connection.send(content: Ack.success(version: version).encoded(), completion: .contentProcessed { _ in })
+        inbound.connection.send(content: Ack.success(version: version, voice: voice).encoded(),
+                                completion: .contentProcessed { _ in })
         if !rest.isEmpty { deliver(rest, inbound) }
     }
 
@@ -308,23 +329,30 @@ public final class VoiceServer: @unchecked Sendable {
         stream.connection.cancel()
     }
 
-    /// Decodes, checks the pairing code, validates, and hands the message on.
+    /// Decodes, checks the pairing code, validates, and hands the message on. Once the code is
+    /// accepted, the answer says what the phone wants (`voice`).
     func handle(_ data: Data, now: Date = Date()) -> Ack {
-        let incoming: Incoming
+        let message: VoiceMessage
         do {
-            let message = try MessageDecoder.decode(data)
-            switch gate.check(message.token, expected: token, now: now) {
-            case .accepted: break
-            case .rejected: return .failure(.badToken, version: version)
-            case .lockedOut: return .failure(.lockedOut, version: version)
-            }
-            incoming = try MessageDecoder.validate(message)
+            message = try MessageDecoder.decode(data)
         } catch {
             return .failure(error, version: version)
         }
+        switch gate.check(message.token, expected: token, now: now) {
+        case .accepted: break
+        case .rejected: return .failure(.badToken, version: version)
+        case .lockedOut: return .failure(.lockedOut, version: version)
+        }
+        let voice = voice()
+        let incoming: Incoming
+        do {
+            incoming = try MessageDecoder.validate(message)
+        } catch {
+            return .failure(error, version: version, voice: voice)
+        }
         if incoming != .ping { endActiveStream() }
         handler(incoming)
-        return .success(version: version)
+        return .success(version: version, voice: voice)
     }
 
     private func reply(on connection: NWConnection, _ ack: Ack) {

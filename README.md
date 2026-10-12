@@ -119,6 +119,7 @@ prints them; most are set by the commands below, and the rest you can edit by ha
 | `phone_token` | the phone's pairing code (`sakamoto pair` sets it) |
 | `phone`, `phone_name` | the phone's `host:port` and Bonjour name, found and kept automatically |
 | `phone_remote` | another address for the phone, tried first, such as its Tailscale address (`"100.x.y.z:47811"`), so it's reached away from home too; when it fails, the local network as usual (empty by default) |
+| `phone_voice` | what the phone last said it wants for the Claude app's voice, `"stream"` or `"text"`, kept automatically from its every answer (empty until it has answered; a phone app older than 1.0 counts as `"stream"`); see "The phone has the last word" below |
 | `app_voice_tap` | where `app-voice-tap` is, for `app-phone`, when it's not in `~/.local/bin` or on the PATH |
 | `dev_path` | for working on the plugin (see Development) |
 
@@ -137,7 +138,11 @@ Voice (`ios/`), and the Mac sends it each response over the local network. The a
 - **Listens** on the local network (TCP, advertised with Bonjour as `_sakamotovoice._tcp`, port
   47811 when it's free). Each connection carries one JSON message, which the app answers with a
   JSON ack, or a live audio stream: a JSON header line, answered at once, then raw 16-bit PCM until
-  the Mac closes it. The protocol is described in
+  the Mac closes it. Every ack to a message with the right pairing code also says what the phone
+  wants for the Claude app's voice, `"voice": "stream"` or `"voice": "text"`, and a stream's header
+  that arrives while it wants the text is declined, which isn't an error:
+  `{"ok": false, "want": "text", "voice": "text", ...}` with no `error`, after which the Mac sends
+  the text. The protocol is described in
   `ios/SakamotoVoiceKit/Sources/SakamotoVoiceKit/Message.swift`.
 - **Pairs** with a 6-digit code it shows (New Code makes another, which unpairs the Mac). Messages
   without the code are refused; ten wrong codes in a minute lock it for a minute.
@@ -153,6 +158,12 @@ Voice (`ios/`), and the Mac sends it each response over the local network. The a
   (`output app-phone`, below), through a quarter-second jitter buffer, with "Streaming" in the
   status bar and the response's text on screen once the voice begins. Repeat plays the last stream
   again. A new message, Stop on the phone, or a new prompt on the Mac ends a stream.
+- **Chooses Claude's voice or the text**, to save mobile data (a stream is about 48 KB/s, roughly
+  170 MB an hour). Settings' "Claude's Voice" offers **Claude's Voice** (always take the stream),
+  **Text on Cellular** (the default: the stream on Wi-Fi, the text on cellular data or another
+  network iOS counts as expensive, such as a Personal Hotspot), and **Text Only**. With the text,
+  the phone reads it in its own voices. Its footer says which network the phone is on and what
+  the Mac is told.
 - **Shows** the last five messages, newest first and large, older ones below in a lighter style;
   each new message scrolls back to the top so its beginning is in view. One slim bar at the top
   holds the status (a dot for listening or speaking, and Awake, marked with Miss Sakamoto's 👩🏻‍🔬 avatar) and small Stop, Repeat, and Settings
@@ -298,6 +309,25 @@ When the phone can't be reached at all, or refuses the pairing code, nothing is 
 Mac stays silent). A phone that stops taking audio for 5 s is given up on. `speak.log` says what
 happened, each time.
 
+**The phone has the last word.** Only the Mac opens connections, so the phone says what it wants
+(its Claude's Voice setting, above, and its network at that moment) in every answer it gives, to
+pings, stops, and text as well as streams, and the Mac keeps the latest as `phone_voice`. While
+that is `"text"`, `app-phone` sends the phone the text and starts no tap, and `app-both` has the
+Claude app read on the Mac alone (unmuted; the Mac's own voices when the debugger is off) and sends
+the phone the text. While it's `"stream"`, or not known yet, both stream as above; when the phone
+then declines the stream (it has just moved to cellular data, say), the Mac remembers that and
+sends the text instead, and `app-both` still presses Read aloud for the Mac. So a change on the
+phone reaches the Mac with its next answer, and coming back to Wi-Fi, one response may still
+arrive as text before the stream resumes. Each choice is logged in `speak.log`. A phone app older
+than 1.0 never says, and is streamed to as before.
+
+On cellular data with a VPN such as Tailscale, the phone's network path runs over the VPN's tunnel
+interface rather than the cellular one. iOS is meant to give a tunnel the type and the cost of the
+interface it runs over (its delegate), so the path should still count as cellular and expensive, and "Text on
+Cellular" should still ask for the text; this follows from how Network.framework reports paths
+(`isExpensive`, `usesInterfaceType(.cellular)`) and hasn't yet been checked on a phone. The
+footer in Settings shows what the phone sees.
+
 A new prompt stops the stream (and tells the phone to stop), and a new response replaces it:
 stopping the speaker stops `app-voice-tap` with it, which removes its tap (the tool also stops by
 itself when nobody reads its audio any more). One catch: the Claude app's own reading isn't stopped (nothing here can press its stop button), and once
@@ -386,13 +416,14 @@ with the next response. Changes to `hooks.json` still need the update and the re
 `ios/project.yml` is the source of the Xcode project (generated and git-ignored); signing is in
 `ios/Config/Signing.xcconfig`, with your team in the git-ignored `Signing.local.xcconfig` beside it.
 The app's version (`MARKETING_VERSION` in `project.yml`) follows the plugin's, except for changes on
-one side only: the plugin is 0.3.2 (`app-voice-tap` captures, `speak.py` streams; `app-both` streams too) and the app is
-0.3.1 (build 7: Miss Sakamoto's avatar marks "Awake"). The app's pure parts (protocol, pairing, language runs, schedule, keep-alive
-sound, and streams' framing and jitter buffer) and its receiver are in the `SakamotoVoiceKit`
+one side only: both are 1.0 (the phone chooses Claude's voice or the text, and the Mac follows), the
+app as build 8. The app's pure parts (protocol, pairing, language runs, schedule, keep-alive
+sound, the Claude's Voice choice, and streams' framing and jitter buffer) and its receiver are in the `SakamotoVoiceKit`
 package, which `app-voice-tap` uses too, and which also has `voice-listen`, a stand-in phone on the
 Mac that prints what arrives (and, with `--save DIR`, keeps streams as WAV files):
 
     cd ios/SakamotoVoiceKit && swift run voice-listen 123456
+    cd ios/SakamotoVoiceKit && swift run voice-listen 123456 --text   # as a phone that wants the text
 
 (macOS's Local Network privacy may keep other machines, and the Mac's own non-loopback addresses,
 from reaching it; for a local try, set `"phone": "127.0.0.1:47811"` in the config.)
