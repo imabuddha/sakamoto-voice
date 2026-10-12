@@ -29,7 +29,14 @@ const inPage = `(async () => {
     const buttons = [...document.querySelectorAll(label)].slice(-4).reverse();
     for (const button of buttons) {
       if (button.dataset.sakamotoRead) { why = 'already read'; continue; }
-      if (key && !norm(messageOf(button).innerText || '').includes(key)) { why = 'no matching message'; continue; }
+      if (key && !norm(messageOf(button).innerText || '').includes(key)) {
+        // For the log: the start and length of what the newest button's message holds.
+        if (button === buttons[0]) {
+          const seen = norm(messageOf(button).innerText || '');
+          why = 'no matching message; the newest holds ' + seen.length + ' chars: ' + seen.slice(0, 40);
+        }
+        continue;
+      }
       button.dataset.sakamotoRead = '1';
       button.click();
       return 'clicked';
