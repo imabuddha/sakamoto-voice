@@ -34,7 +34,7 @@ It has four parts:
 
 From a fresh clone (the path below is wherever you cloned it):
 
-    git clone <this repository's URL> sakamoto-voice
+    git clone https://github.com/imabuddha/sakamoto-voice.git
     claude plugin marketplace add /path/to/sakamoto-voice
     claude plugin install sakamoto-voice@pragmaphilia-local
 
