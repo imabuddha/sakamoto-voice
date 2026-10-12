@@ -117,8 +117,8 @@ private struct EmptyState: View {
 }
 
 /// The voices the watch reads with: any installed English and Japanese voice (premium and enhanced
-/// ones too, such as those downloaded under Accessibility › Live Speech), or Best, the highest
-/// quality installed.
+/// ones too, such as those downloaded under Accessibility › Live Speech). Until one is chosen, the
+/// highest-quality voice installed, listed first.
 private struct VoicesSection: View {
     @AppStorage(WatchSpeaker.englishChoiceKey) private var english = ""
     @AppStorage(WatchSpeaker.japaneseChoiceKey) private var japanese = ""
@@ -130,13 +130,13 @@ private struct VoicesSection: View {
         } header: {
             Text("Voices")
         } footer: {
-            Text("Best uses the highest-quality voice installed on the watch.")
+            Text("Premium and Enhanced voices can be added under Settings › Accessibility › Live Speech.")
         }
     }
 
     private func picker(_ title: String, selection: Binding<String>, voices: [AVSpeechSynthesisVoice]) -> some View {
-        Picker(title, selection: selection) {
-            Text("Best").tag("")
+        Picker(title, selection: Binding(get: { selection.wrappedValue.isEmpty ? (voices.first?.identifier ?? "") : selection.wrappedValue },
+                                         set: { selection.wrappedValue = $0 })) {
             ForEach(voices, id: \.identifier) { voice in
                 Text(label(voice)).tag(voice.identifier)
             }

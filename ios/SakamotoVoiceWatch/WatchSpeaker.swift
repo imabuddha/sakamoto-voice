@@ -69,25 +69,15 @@ final class WatchSpeaker: NSObject {
             .sorted { ($0.quality.rawValue, $0.name) > ($1.quality.rawValue, $1.name) }
     }
 
-    /// The chosen English voice, else the best installed one for the watch's own English, else any.
+    /// The chosen English voice, else the highest-quality English voice installed (any region:
+    /// the watch's own region isn't preferred, so a premium voice from another region wins).
     static var englishVoice: AVSpeechSynthesisVoice? {
-        if let voice = chosen(englishChoiceKey) { return voice }
-        let current = AVSpeechSynthesisVoice.currentLanguageCode()
-        return best(current.hasPrefix("en") ? current : "en") ?? best("en")
-            ?? AVSpeechSynthesisVoice(language: "en-US")
+        chosen(englishChoiceKey) ?? voices("en").first ?? AVSpeechSynthesisVoice(language: "en-US")
     }
 
-    /// The best installed Japanese voice (nil when the watch has none: then the system's default
-    /// voice reads Japanese runs).
+    /// The chosen Japanese voice, else the highest-quality Japanese voice installed.
     static var japaneseVoice: AVSpeechSynthesisVoice? {
-        chosen(japaneseChoiceKey) ?? best("ja") ?? AVSpeechSynthesisVoice(language: "ja-JP")
-    }
-
-    private static func best(_ prefix: String) -> AVSpeechSynthesisVoice? {
-        AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language.hasPrefix(prefix) }
-            .filter { !$0.voiceTraits.contains(.isNoveltyVoice) && !$0.voiceTraits.contains(.isPersonalVoice) }
-            .max { $0.quality.rawValue < $1.quality.rawValue }
+        chosen(japaneseChoiceKey) ?? voices("ja").first ?? AVSpeechSynthesisVoice(language: "ja-JP")
     }
 }
 
