@@ -1,0 +1,6 @@
+{
+  "name": "sakamoto-voice",
+  "version": "0.3.0",
+  "description": "Speaks each finished Claude Code response aloud with macOS say (Japanese and English voices, with voice markers), on the Mac, an iPhone running Sakamoto Voice, or both; or in the Claude app's own voice, on the Mac or streamed live to the phone (experimental).",
+  "author": { "name": "Pragmaphilia Labs" }
+}

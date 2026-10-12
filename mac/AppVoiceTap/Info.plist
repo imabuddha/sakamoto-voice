@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.pragmaphilia.AppVoiceTap</string>
+	<key>CFBundleName</key>
+	<string>app-voice-tap</string>
+	<key>CFBundleDisplayName</key>
+	<string>Sakamoto Voice Tap</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.3.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Sakamoto Voice Tap captures the Claude app's voice as it reads a response aloud and sends it to the Sakamoto Voice app on your iPhone. It captures no other app's audio.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Pragmaphilia Labs.</string>
+</dict>
+</plist>

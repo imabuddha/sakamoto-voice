@@ -1,0 +1,9 @@
+#!/bin/zsh
+# sakamoto: Sakamoto Voice's switch, from any Terminal: plugin/scripts/speak.py with the same
+# arguments (sakamoto status, stop, test, output phone, pair 123456, ...). It works through a
+# symlink, such as ~/.local/bin/sakamoto (see README.md).
+speak="${0:A:h:h}/plugin/scripts/speak.py"
+if (( $# == 0 )); then
+  exec python3 "$speak" help        # the usage (with no arguments, speak.py is the Stop hook)
+fi
+exec python3 "$speak" "$@"

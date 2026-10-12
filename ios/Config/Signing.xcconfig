@@ -1,0 +1,15 @@
+// Signing for Sakamoto Voice: automatic, with your own Apple Development team. No team is
+// committed here; put yours in Signing.local.xcconfig, next to this file (git ignores it), as one
+// line:
+//
+//     DEVELOPMENT_TEAM = ABCDE12345
+//
+// (Your Team ID is under Membership details at developer.apple.com/account, or in Xcode → Settings
+// → Accounts.) A team picked by hand in Xcode's Signing & Capabilities tab is lost the next time
+// the project is generated, so the file is the place for it. Simulator builds need no team.
+
+DEVELOPMENT_TEAM =
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = Apple Development
+
+#include? "Signing.local.xcconfig"

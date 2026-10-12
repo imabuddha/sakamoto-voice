@@ -1,0 +1,14 @@
+{
+  "name": "pragmaphilia-local",
+  "owner": {
+    "name": "Pragmaphilia Labs"
+  },
+  "plugins": [
+    {
+      "name": "sakamoto-voice",
+      "source": "./plugin",
+      "description": "Speaks each finished response aloud."
+    }
+  ],
+  "description": "Pragmaphilia Labs' local plugins for Claude Code."
+}
