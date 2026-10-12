@@ -25,8 +25,8 @@ configFiles:
 settings:
   base:
     # The watch app has the iPhone app's version and build, as an embedded watch app must.
-    MARKETING_VERSION: "1.1.1"
-    CURRENT_PROJECT_VERSION: 10
+    MARKETING_VERSION: "1.1.2"
+    CURRENT_PROJECT_VERSION: 11
     # The iPhone app's bundle ID; the watch app's is this plus ".watchkitapp". Use your own.
     APP_BUNDLE_ID: com.pragmaphilia.SakamotoVoice
     SWIFT_VERSION: "6.0"

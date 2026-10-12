@@ -252,7 +252,7 @@ Voice (`ios/`), and the Mac sends it each response over the local network. The a
 - **Passes messages on to an Apple Watch** (below), when the watch app is installed.
 
 Before the first message it shows the pairing code, how to pair, and, small at the bottom, the
-installed version ("Sakamoto Voice 1.1.1 (10)"); Settings → About shows it too.
+installed version ("Sakamoto Voice 1.1.2 (11)"); Settings → About shows it too.
 
 It runs on iOS 18 and later, so older phones such as the iPhone XS can serve as speakers.
 
