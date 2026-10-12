@@ -1,7 +1,9 @@
 // swift-tools-version: 6.0
 // AppVoiceTap: `app-voice-tap`, the Mac side of `output app-phone`. It captures only the Claude
 // desktop app's audio (a Core Audio process tap, which can also mute the app on the Mac's
-// speakers) and streams it live to the Sakamoto Voice app on the phone.
+// speakers), live, for the Sakamoto Voice app on the phone: with --stdout (as speak.py runs it)
+// it writes the audio to standard output and speak.py sends it to the phone; with --to it
+// streams to the phone itself.
 //
 //     ../build.sh          # builds it (release) into ../../bin/app-voice-tap, signed
 //     swift test           # the unit tests (no audio is captured)
@@ -24,7 +26,8 @@ let package = Package(
         .package(path: "../../ios/SakamotoVoiceKit"),
     ],
     targets: [
-        // The pure parts: options, the silence gate, resampling, process matching, the phone socket.
+        // The pure parts: options, the silence gate, resampling, process matching, the
+        // audio's destinations (the phone socket, standard output).
         .target(name: "AppVoiceTapCore", dependencies: [
             .product(name: "SakamotoVoiceKit", package: "SakamotoVoiceKit"),
         ]),

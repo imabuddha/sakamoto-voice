@@ -262,28 +262,39 @@ This mode exists because no supported route does; we've asked Anthropic for one.
 For when you're away from the Mac: the same voice, streamed live to the phone, with the Mac's
 speakers silent. With `output app-phone`, the speaker (still detached; the hook never waits):
 
-1. pings the phone (finding it again if it moved);
-2. starts `app-voice-tap` (`mac/AppVoiceTap`), which connects to the phone with a stream header
-   (carrying the response's text for its screen), then taps the Claude app's audio with a Core
-   Audio **process tap**: every process running from inside `/Applications/Claude.app` (its audio
-   comes from a helper process) or with the bundle ID `com.anthropic.claudefordesktop` or
+1. connects to the phone (finding it again if it moved) and sends the stream's header, carrying
+   the response's text for its screen; the phone accepts it at once (or refuses a wrong code);
+2. starts `app-voice-tap --stdout` (`mac/AppVoiceTap`), which taps the Claude app's audio with a
+   Core Audio **process tap**: every process running from inside `/Applications/Claude.app` (its
+   audio comes from a helper process) or with the bundle ID `com.anthropic.claudefordesktop` or
    `...claudefordesktop.helper` (on macOS 26 and later the tap also names those bundle IDs, so a
    helper that starts later is tapped from its first sound). The tap is *muted when tapped*: while
    it's read, the Claude app is silent on the Mac. Only the Claude app is captured; other apps
    play on as usual;
-3. presses Read aloud, as `output app` does (the same debugger, and the same risk);
-4. `app-voice-tap` streams the voice as 16-bit mono PCM at 24 kHz (about 48 KB/s) over one TCP
-   connection, leaving out the silence before and after it, until the app has been quiet for 2.5 s
-   (or 15 minutes have passed), and exits; the phone plays it as it arrives.
+3. presses Read aloud, as `output app` does (the same debugger; the same risk, below);
+4. `app-voice-tap` writes the voice to its standard output as 16-bit mono PCM at 24 kHz (about
+   48 KB/s), leaving out the silence before and after it, until the app has been quiet for 2.5 s
+   (or 15 minutes have passed), and exits; the speaker passes it on to the phone over the stream's
+   one TCP connection as it comes, and the phone plays it as it arrives.
+
+**Why the work is split.** `app-voice-tap` only captures; `speak.py` owns the network. The tool
+re-launches itself as its own "responsible" process, so that System Audio Recording is its own
+permission (below); but then macOS's **Local Network** privacy blocks its connections to the
+phone ("No route to host"), even with app-voice-tap allowed under Local Network in System
+Settings. `speak.py`, which the Claude app runs, may already reach the phone, so it opens the
+stream and sends the audio, and the tool needs no network permission at all.
 
 Whenever the voice can't start, the phone gets the response as **text** instead and reads it in
 its own voices, so you always hear something: when the app's debugger is off or the click fails,
-when `app-voice-tap` isn't built or can't start (the permission is off, say), or when no sound
-comes from the app within 10 s. When the phone can't be reached at all, nothing is read aloud (the
-Mac stays silent). `speak.log` says what happened, each time.
+when `app-voice-tap` isn't built or can't start (the permission is off, say), when the phone's app
+is older than 0.3.0 (it doesn't answer a stream), or when no sound comes from the app within 10 s.
+When the phone can't be reached at all, or refuses the pairing code, nothing is read aloud (the
+Mac stays silent). A phone that stops taking audio for 5 s is given up on. `speak.log` says what
+happened, each time.
 
-A new prompt stops the stream (and tells the phone to stop), and a new response replaces it. One
-catch: the Claude app's own reading isn't stopped (nothing here can press its stop button), and once
+A new prompt stops the stream (and tells the phone to stop), and a new response replaces it:
+stopping the speaker stops `app-voice-tap` with it, which removes its tap (the tool also stops by
+itself when nobody reads its audio any more). One catch: the Claude app's own reading isn't stopped (nothing here can press its stop button), and once
 the tap is gone its mute is too, so the rest of a long reading interrupted that way is heard on the
 Mac.
 
@@ -308,7 +319,8 @@ rebuilds; signed ad hoc, macOS asks again after each rebuild. Until it's allowed
 the text.
 
 The risk note above applies unchanged: this mode uses the same debugger. The tap itself opens
-nothing: it only connects out to the paired phone, with its pairing code.
+nothing and, as `speak.py` runs it, connects nowhere: the speaker connects out to the paired phone,
+with its pairing code.
 
 To look at it live:
 
@@ -317,6 +329,13 @@ To look at it live:
                                  # a stand-in phone on the Mac that keeps each stream as a WAV
     app-voice-tap --to 127.0.0.1:47811 --token 123456 --mute --verbose
                                  # by hand: prints "ready"; then press Read aloud in the app
+    app-voice-tap --stdout --mute --verbose > ~/Desktop/voice.pcm
+                                 # as speak.py runs it: the raw audio to a file, the rest on screen
+
+`--to` (the tool connecting to the phone itself) is kept for trying it by hand like this, on
+the Mac's own loopback address; to a phone on the network, Local Network privacy blocks it (see
+above) unless `--no-disclaim` makes the app that started it (Terminal, say) responsible, which
+then needs the System Audio Recording permission itself.
 
 ## Privacy
 
@@ -360,11 +379,12 @@ with the next response. Changes to `hooks.json` still need the update and the re
 
 `ios/project.yml` is the source of the Xcode project (generated and git-ignored); signing is in
 `ios/Config/Signing.xcconfig`, with your team in the git-ignored `Signing.local.xcconfig` beside it.
-The app's version (`MARKETING_VERSION` in `project.yml`) follows the plugin's (0.3.0). The app's
-pure parts (protocol, pairing, language runs, schedule, keep-alive sound, and streams' framing and
-jitter buffer) and its receiver are in the `SakamotoVoiceKit` package, which `app-voice-tap` uses
-too, and which also has `voice-listen`, a stand-in phone on the Mac that prints what arrives (and,
-with `--save DIR`, keeps streams as WAV files):
+The app's version (`MARKETING_VERSION` in `project.yml`) follows the plugin's, except for changes on
+one side only: the plugin is 0.3.1 (`app-voice-tap` captures, `speak.py` streams) and the app is
+still 0.3.0 (build 6). The app's pure parts (protocol, pairing, language runs, schedule, keep-alive
+sound, and streams' framing and jitter buffer) and its receiver are in the `SakamotoVoiceKit`
+package, which `app-voice-tap` uses too, and which also has `voice-listen`, a stand-in phone on the
+Mac that prints what arrives (and, with `--save DIR`, keeps streams as WAV files):
 
     cd ios/SakamotoVoiceKit && swift run voice-listen 123456
 

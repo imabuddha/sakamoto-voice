@@ -4,7 +4,7 @@ import SakamotoVoiceKit
 /// app-voice-tap's command line.
 public struct Options: Equatable, Sendable {
     public enum Mode: Equatable, Sendable {
-        /// Tap the Claude app and stream it to the phone (the default).
+        /// Tap the Claude app and stream it: to the phone (`--to`), or to standard output (`--stdout`).
         case stream
         /// Ask for the System Audio Recording permission now (shows macOS's prompt once).
         case check
@@ -14,6 +14,9 @@ public struct Options: Equatable, Sendable {
     }
 
     public var mode: Mode = .stream
+    /// Write the raw audio to standard output (status lines to standard error) instead of
+    /// connecting to the phone: speak.py reads it and sends it on.
+    public var toStdout = false
     public var host = ""
     public var port: UInt16 = 0
     public var token = ""
@@ -28,7 +31,7 @@ public struct Options: Equatable, Sendable {
     public var rate = VoiceProtocol.defaultStreamRate
     /// Quieter than this is silence.
     public var thresholdDB = -60.0
-    /// The response's text, for the phone's screen.
+    /// The response's text, for the phone's screen (`--to` only).
     public var text: String?
     public var textFromStdin = false
     /// Processes running from inside this app bundle are tapped...
@@ -49,15 +52,29 @@ public struct Options: Equatable, Sendable {
     public init() {}
 
     public static let usage = """
-        app-voice-tap: streams the Claude desktop app's audio, live, to the Sakamoto Voice app on an iPhone.
+        app-voice-tap: captures the Claude desktop app's audio, live, for the Sakamoto Voice app on an iPhone.
 
         Usage:
+          app-voice-tap --stdout [options]
+                                     the audio to standard output (as speak.py runs it)
           app-voice-tap --to HOST:PORT --token CODE [options]
+                                     the audio straight to the phone (for trying it by hand)
           app-voice-tap --check      ask for the System Audio Recording permission now
           app-voice-tap --list       list the processes Core Audio knows (the Claude app's marked)
 
-        It taps the Claude app's processes, connects to the phone, prints "ready", waits for the app
-        to start playing, streams until the app has been silent for a while, and exits.
+        It taps the Claude app's processes, prints "ready", waits for the app to start playing,
+        streams until the app has been silent for a while, prints a one-line result, and exits.
+
+        With --stdout, standard output gets only the audio: raw 16-bit signed little-endian mono PCM
+        at --rate, with the silence before and after the sound left out; "ready", the result, and
+        any errors go to standard error. When the reader closes the pipe, it stops. speak.py runs it
+        this way and sends the audio to the phone itself: once this tool re-launches itself as its
+        own responsible process (so that System Audio Recording is its own permission), macOS's
+        Local Network privacy blocks its connections to the phone, so it needs only that permission,
+        and the plugin, which may use the network, does the rest.
+
+        With --to, it connects to the phone first (the stream's header, with --token and --text),
+        and "ready" and the result go to standard output.
 
         Options:
           --mute                 silence the Claude app on the Mac's speakers while tapping
@@ -66,8 +83,8 @@ public struct Options: Equatable, Sendable {
           --wait-start S         give up when no sound begins within S seconds of "ready" (6)
           --rate HZ              the stream's sample rate, mono 16-bit (24000)
           --threshold-db DB      quieter than DB dBFS is silence (-60)
-          --text TEXT            the response's text, for the phone's screen
-          --text-stdin           read that text from standard input
+          --text TEXT            the response's text, for the phone's screen (--to only)
+          --text-stdin           read that text from standard input (--to only)
           --app PATH             the app whose processes are tapped (/Applications/Claude.app)
           --bundle-id ID         tap processes with this bundle ID too (repeatable; default
                                  com.anthropic.claudefordesktop and its helpers)
@@ -77,17 +94,19 @@ public struct Options: Equatable, Sendable {
           --no-permission-check  don't look at the permission first
           --verbose              say more on standard error
 
-        Exit status: 0 streamed (or stopped); 2 usage; 3 permission; 4 the phone; 5 the tap;
-        6 no sound began in time.
+        Exit status: 0 streamed (or stopped, or the reader went away); 2 usage; 3 permission; 4 the
+        phone (or writing the audio failed); 5 the tap; 6 no sound began in time.
         """
 
     public enum ParseError: Error, Equatable, CustomStringConvertible {
         case missing(String)
         case badValue(String, String)
         case unknown(String)
+        case conflict(String, String)
 
         public var description: String {
             switch self {
+            case .conflict(let one, let other): "\(one) and \(other) don't go together"
             case .missing(let what): "missing \(what)"
             case .badValue(let option, let value): "bad value for \(option): \(value)"
             case .unknown(let option): "unknown option \(option)"
@@ -122,6 +141,7 @@ public struct Options: Equatable, Sendable {
                 let code = PairingCode.normalize(text)
                 guard PairingCode.isValid(code) else { throw .badValue(argument, text) }
                 options.token = code
+            case "--stdout": options.toStdout = true
             case "--mute": options.mute = true
             case "--max-seconds": options.maxSeconds = try seconds(argument)
             case "--silence-seconds": options.silenceSeconds = try seconds(argument)
@@ -151,7 +171,10 @@ public struct Options: Equatable, Sendable {
             i += 1
         }
         if !customBundleIDs.isEmpty { options.bundleIDs += customBundleIDs }
-        if options.mode == .stream {
+        if options.toStdout {
+            if !options.host.isEmpty { throw .conflict("--stdout", "--to") }
+            if !options.token.isEmpty { throw .conflict("--stdout", "--token") }
+        } else if options.mode == .stream {
             if options.host.isEmpty { throw .missing("--to HOST:PORT") }
             if options.token.isEmpty { throw .missing("--token CODE") }
         }

@@ -40,8 +40,9 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
             "app-both": the Claude app's voice on the Mac, and the text to the phone (its own voices).
             "app-phone": the same voice, streamed live to the phone while the Mac stays silent:
             app-voice-tap (mac/build.sh builds it) taps the Claude app's audio, muted on the Mac,
-            and streams it to the phone, which also shows the text. When the debugger is off, the
-            tool isn't built, or no sound comes, the phone gets the text instead (its own voices).
+            and this script streams it to the phone, which also shows the text. When the debugger
+            is off, the tool isn't built, or no sound comes, the phone gets the text instead (its
+            own voices).
   app_voice_tap  where app-voice-tap is, when it's not in ~/.local/bin or on the PATH.
   dev_path  for working on the plugin: a checkout's plugin/ folder. The installed (cached) copy then
             runs that checkout's speak.py instead, so edits there take effect with the next
@@ -428,9 +429,10 @@ def find_phone(token, browse_seconds=2.0):
     return None
 
 
-def send_to_phone(payload, timeout=10.0):
-    """Sends to the remembered phone, finding it again (and remembering it) when that fails.
-    Returns the phone's answer, or None when no phone could be reached; logs what went wrong."""
+def reach_phone(attempt):
+    """`attempt(address)` at the remembered phone, and, when that raises OSError or ValueError, at
+    the phone found again (and remembered). Returns what it returns, or None when no phone could be
+    reached; logs what went wrong."""
     cfg = config()
     token = cfg.get('phone_token', '')
     if not token:
@@ -439,7 +441,7 @@ def send_to_phone(payload, timeout=10.0):
     address = cfg.get('phone', '')
     if address:
         try:
-            return exchange(address, payload, timeout)
+            return attempt(address)
         except (OSError, ValueError) as e:
             log(f'phone: {address}: {e}; looking for it again')
     found = find_phone(token)
@@ -450,10 +452,16 @@ def send_to_phone(payload, timeout=10.0):
     remember(phone=address, phone_name=name)
     log(f'phone: found {name!r} at {address}')
     try:
-        return exchange(address, payload, timeout)
+        return attempt(address)
     except (OSError, ValueError) as e:
         log(f'phone: {address}: {e}')
         return None
+
+
+def send_to_phone(payload, timeout=10.0):
+    """Sends to the remembered phone, finding it again (and remembering it) when that fails.
+    Returns the phone's answer, or None when no phone could be reached; logs what went wrong."""
+    return reach_phone(lambda address: exchange(address, payload, timeout))
 
 
 def concat_wavs(paths, out_path, gap=0.12):
@@ -587,15 +595,76 @@ def app_read(text, delay=0.5):
 # ---- The Claude app's voice on the phone (output app-phone) ---------------------------------
 #
 # app-voice-tap (mac/AppVoiceTap, built by mac/build.sh) taps the Claude app's audio with a Core
-# Audio process tap, muted on the Mac's speakers, and streams it live to the phone. It connects to
-# the phone, starts the tap, and prints "ready"; then Read aloud is pressed; it streams until the
-# app has been quiet for a moment, prints one line, and exits (status 6: no sound came).
+# Audio process tap, muted on the Mac's speakers. Run with --stdout, it only captures: it writes
+# the raw audio (16-bit mono PCM) to its standard output, and "ready" and a one-line result to its
+# standard error. The network is this script's job: macOS's Local Network privacy blocks the tool's
+# own connections once it's responsible for itself (as it must be, to hold the System Audio
+# Recording permission), while this script, run by the Claude app, may reach the phone.
+#
+# So: connect to the phone and send the stream's header (the phone answers at once); start the
+# tool and wait for "ready"; press Read aloud; pass the tool's audio on to the phone until the tool
+# exits, once the app has been quiet for a moment (status 6: no sound came); then close.
 
 APP_READ_DELAY = 0.5      # seconds from the Stop hook to looking for Read aloud (app-read.mjs waits for it)
 TAP_WAIT_START = 10       # seconds the tap waits for the app's voice after "ready"
 TAP_MAX_SECONDS = 900     # the longest reading streamed (max_chars of 6000 is about 7 minutes)
-TAP_READY_TIMEOUT = 8     # seconds to connect to the phone and start the tap
+TAP_READY_TIMEOUT = 8     # seconds to start the tap
 TAP_NO_SOUND = 6          # app-voice-tap's exit status when no sound came
+STREAM_RATE = 24000       # the stream's frames a second (mono, 16-bit)
+STREAM_ANSWER_TIMEOUT = 4.0   # seconds for the phone to answer a stream's header
+STREAM_SEND_TIMEOUT = 5.0     # a phone that takes no audio for this long is given up on
+
+
+def stream_header(token, text='', rate=STREAM_RATE):
+    """A stream's header line, as bytes with its newline (as VoiceMessage.streamHeader in
+    Message.swift makes it)."""
+    msg = {'channels': 1, 'format': 'pcm16', 'kind': 'stream', 'rate': rate, 'token': token}
+    if text:
+        msg['text'] = text
+    return json.dumps(msg, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8') + b'\n'
+
+
+def open_stream(address, header, timeout=STREAM_ANSWER_TIMEOUT):
+    """Connects to the phone and sends a stream's header. Returns (the socket, the phone's answer:
+    a dict, or None when it didn't answer in time, as phones before 0.3.0 don't). Raises OSError
+    when the phone can't be reached and ValueError when its answer isn't JSON."""
+    host, port = split_address(address)
+    sock = socket.create_connection((host, port), timeout=timeout)
+    try:
+        sock.settimeout(timeout)
+        sock.sendall(header)
+        line = b''
+        try:
+            while b'\n' not in line:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                line += chunk
+        except socket.timeout:
+            return sock, None
+        ack = json.loads(line.split(b'\n', 1)[0].decode('utf-8') or 'null') or {}
+        if not isinstance(ack, dict):
+            raise ValueError(f'not an answer: {line[:80]!r}')
+        sock.settimeout(STREAM_SEND_TIMEOUT)
+        return sock, ack
+    except BaseException:
+        sock.close()
+        raise
+
+
+def end_stream(sock, timeout=2.0):
+    """Ends the stream: closes the sending side, then waits up to `timeout` seconds for the phone
+    to close its side (so the last audio isn't cut off by a reset), and closes."""
+    try:
+        sock.shutdown(socket.SHUT_WR)
+        sock.settimeout(timeout)
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and sock.recv(4096):
+            pass
+    except OSError:
+        pass
+    finally:
+        sock.close()
 
 
 def tap_path(cfg):
@@ -610,53 +679,91 @@ def tap_path(cfg):
 
 
 class Tap:
-    """app-voice-tap, running. It stays in the speaker's process group, so stopping the speaker
-    (a new response, or `speak.py stop`) stops it too, and it removes its tap as it exits."""
+    """app-voice-tap --stdout, running: its audio on standard output, its status lines on standard
+    error. It stays in the speaker's process group, so stopping the speaker (a new response, or
+    `speak.py stop`) stops it too, and it removes its tap as it exits; it also stops by itself
+    when nobody reads its audio any more."""
 
-    def __init__(self, path, address, token, text):
+    def __init__(self, path):
         self.proc = subprocess.Popen(
-            [path, '--to', address, '--token', token, '--mute', '--text-stdin',
+            [path, '--stdout', '--mute', '--rate', str(STREAM_RATE),
              '--wait-start', str(TAP_WAIT_START), '--max-seconds', str(TAP_MAX_SECONDS)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        self.output = b''
-        try:
-            self.proc.stdin.write(text.encode('utf-8'))
-            self.proc.stdin.close()
-        except OSError:      # it has already exited; its output says why
-            pass
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.output = b''        # its standard error
+        self.sent = 0            # bytes of audio passed on
 
-    def _read(self, timeout, until=None):
-        """Reads its output until `until` is a line of it, it closes its output, or the time is up;
-        True when `until` was seen."""
-        fd = self.proc.stdout.fileno()
-        end = time.monotonic() + timeout
-        while (left := end - time.monotonic()) > 0:
-            if until and until in self.output.split(b'\n')[:-1]:
-                return True
-            ready, _, _ = select.select([fd], [], [], left)
-            if ready:
-                chunk = os.read(fd, 4096)
-                if not chunk:
-                    break
-                self.output += chunk
-        return bool(until) and until in self.output.split(b'\n')[:-1]
+    def _lines(self):
+        return self.output.split(b'\n')[:-1]
+
+    def _read_status(self):
+        """Reads what's waiting on its standard error; False at its end."""
+        chunk = os.read(self.proc.stderr.fileno(), 4096)
+        self.output += chunk
+        return bool(chunk)
 
     def wait_ready(self, timeout=TAP_READY_TIMEOUT):
-        """True once it says the phone took the stream and the tap is running."""
-        return self._read(timeout, until=b'ready')
+        """True once it says the tap is running ("ready" on its standard error)."""
+        fd = self.proc.stderr.fileno()
+        end = time.monotonic() + timeout
+        while b'ready' not in self._lines() and (left := end - time.monotonic()) > 0:
+            ready, _, _ = select.select([fd], [], [], left)
+            if ready and not self._read_status():
+                break
+        return b'ready' in self._lines()
+
+    @property
+    def seconds(self):
+        """How much audio has been passed on, in seconds."""
+        return self.sent / 2 / STREAM_RATE
+
+    def relay(self, sock, timeout):
+        """Passes its audio on to the phone until it ends it (closing its standard output), the
+        phone closes the stream, sending fails, or `timeout` seconds pass. None when it ended by
+        itself; else why the stream was cut short (it may still be running: stop() it)."""
+        out, err = self.proc.stdout.fileno(), self.proc.stderr.fileno()
+        watched = [out, err, sock]
+        end = time.monotonic() + timeout
+        while out in watched:
+            left = end - time.monotonic()
+            if left <= 0:
+                return f'still going after {timeout:.0f} s'
+            ready, _, _ = select.select(watched, [], [], left)
+            if err in ready and not self._read_status():
+                watched.remove(err)
+            if sock in ready:
+                # The phone sends nothing after its answer, so this is its end of the stream.
+                try:
+                    if not sock.recv(4096):
+                        return 'the phone ended the stream (a newer message or Stop)'
+                except OSError as e:
+                    return f'the phone ended the stream ({e})'
+            if out in ready:
+                chunk = os.read(out, 65536)
+                if not chunk:
+                    watched.remove(out)
+                    continue
+                try:
+                    sock.sendall(chunk)
+                except socket.timeout:
+                    return f'the phone took no audio for {STREAM_SEND_TIMEOUT:.0f} s'
+                except OSError as e:
+                    return f'sending to the phone failed ({e})'
+                self.sent += len(chunk)
+        return None
 
     def last_line(self):
         lines = [line.strip() for line in self.output.decode('utf-8', 'replace').splitlines()]
         lines = [line for line in lines if line and line != 'ready']
         return lines[-1][:300] if lines else 'no output'
 
-    def finish(self, timeout):
-        """Waits for it to end (stopping it after `timeout`); (exit status, its last line)."""
-        self._read(timeout)
-        return self.stop(), self.last_line()
-
-    def stop(self):
-        """Stops it if it's still running; its exit status."""
+    def stop(self, grace=3.0):
+        """Waits up to `grace` seconds for it to end, then stops it (at once when `grace` is 0);
+        returns its exit status. Its last status lines are read on the way."""
+        if self.proc.poll() is None and grace:
+            try:
+                self.proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
         if self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -664,7 +771,11 @@ class Tap:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+        fd = self.proc.stderr.fileno()
+        while select.select([fd], [], [], 0.2)[0] and self._read_status():
+            pass
         self.proc.stdout.close()
+        self.proc.stderr.close()
         return self.proc.returncode
 
 
@@ -684,25 +795,51 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices):
     if not path:
         return fallback('app-voice-tap is not built (run mac/build.sh)')
     started = time.monotonic()
-    ack = send_to_phone(message(token, 'ping'), timeout=4.0)     # finds the phone again if it moved
-    if not ack or not ack.get('ok'):
-        log(f'app-phone: the phone did not answer ({(ack or {}).get("error", "unreachable")}); nothing read aloud')
+    header = stream_header(token, text)
+    opened = reach_phone(lambda address: open_stream(address, header))   # finds the phone again if it moved
+    if not opened:
+        log('app-phone: the phone did not answer (unreachable); nothing read aloud')
         return
-    address = config().get('phone') or cfg.get('phone')
-    tap = Tap(path, address, token, text)
-    if not tap.wait_ready():
-        tap.stop()
-        return fallback(f'app-voice-tap did not start: {tap.last_line()}')
-    if not app_read(raw, delay=max(0.0, APP_READ_DELAY - (time.monotonic() - started))):
-        tap.stop()
-        return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found")
-    status, line = tap.finish(timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30)
-    if status == TAP_NO_SOUND:
-        fallback(f'no sound from the Claude app ({line})')
-    elif status == 0:
-        log(f'app-phone: {line}')
+    sock, ack = opened
+    if ack is None:
+        sock.close()
+        return fallback("the phone didn't answer the stream (is its app 0.3.0 or later?)")
+    if not ack.get('ok'):
+        sock.close()
+        log(f'app-phone: the phone refused the stream ({ack.get("error")}); nothing read aloud')
+        return
+    try:
+        tap = Tap(path)
+    except OSError as e:
+        sock.close()
+        return fallback(f'app-voice-tap did not start: {e}')
+    try:
+        if not tap.wait_ready():
+            tap.stop(grace=0)
+            sock.close()
+            return fallback(f'app-voice-tap did not start: {tap.last_line()}')
+        if not app_read(raw, delay=max(0.0, APP_READ_DELAY - (time.monotonic() - started))):
+            tap.stop(grace=0)
+            sock.close()
+            return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found")
+        cut = tap.relay(sock, timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30)
+        status = tap.stop(grace=0 if cut else 3.0)
+    except BaseException:
+        tap.stop(grace=0)
+        sock.close()
+        raise
+    if cut:
+        sock.close()
+        log(f'app-phone: {cut}, after {tap.seconds:.1f} s; app-voice-tap: {tap.last_line()}')
+    elif status == TAP_NO_SOUND:
+        sock.close()
+        fallback(f'no sound from the Claude app ({tap.last_line()})')
     else:
-        log(f'app-phone: app-voice-tap stopped with status {status}: {line}')
+        end_stream(sock)
+        if status == 0:
+            log(f'app-phone: {tap.seconds:.1f} s to the phone; app-voice-tap: {tap.last_line()}')
+        else:
+            log(f'app-phone: app-voice-tap stopped with status {status}: {tap.last_line()}')
 
 
 def installed_voices():

@@ -30,6 +30,21 @@ import SakamotoVoiceKit
         #expect(options.text == nil)
     }
 
+    @Test func stdoutNeedsNoPhone() throws {
+        let options = try Options.parse(["--stdout", "--mute", "--wait-start", "10", "--max-seconds", "900"])
+        #expect(options.mode == .stream && options.toStdout && options.mute)
+        #expect(options.host.isEmpty && options.token.isEmpty)
+        #expect((options.waitStart, options.maxSeconds) == (10, 900))
+        #expect(!(try Options.parse(["--to", "a:1", "--token", "123456"]).toStdout))
+    }
+
+    @Test func stdoutOrThePhoneNotBoth() {
+        #expect(throws: Options.ParseError.conflict("--stdout", "--to")) {
+            try Options.parse(["--stdout", "--to", "a:1", "--token", "123456"])
+        }
+        #expect(throws: Options.ParseError.conflict("--stdout", "--token")) { try Options.parse(["--stdout", "--token", "123456"]) }
+    }
+
     @Test func checkAndListNeedNoPhone() throws {
         #expect(try Options.parse(["--check"]).mode == .check)
         #expect(try Options.parse(["--list"]).mode == .list)
@@ -199,6 +214,65 @@ import SakamotoVoiceKit
         #expect(matcher.tapBundleIDs(seen: ["com.anthropic.claudefordesktop.helper", "com.anthropic.claudefordesktop.other", ""])
                 == ["com.anthropic.claudefordesktop", "com.anthropic.claudefordesktop.helper",
                     "com.anthropic.claudefordesktop.other"])
+    }
+}
+
+/// The --stdout writer, on a pipe.
+@Suite struct PipeSinkTests {
+    func pipe() throws -> (read: Int32, write: Int32) {
+        var fds: [Int32] = [0, 0]
+        try #require(Darwin.pipe(&fds) == 0)
+        return (fds[0], fds[1])
+    }
+
+    static func readAll(_ fd: Int32) -> Data {
+        var data = Data()
+        var chunk = [UInt8](repeating: 0, count: 65_536)
+        while true {
+            let n = read(fd, &chunk, chunk.count)
+            if n <= 0 { return data }
+            data.append(contentsOf: chunk[0..<n])
+        }
+    }
+
+    @Test func everythingArrivesInOrder() async throws {
+        let (r, w) = try pipe()
+        defer { Darwin.close(r) }
+        // Far more than a pipe holds, so the writer waits for the reader as it goes.
+        let audio = PCM16.data((0..<500_000).map { Int16(truncatingIfNeeded: $0 &* 7) })
+        let reader = Task.detached { Self.readAll(r) }
+        let sink = PipeSink(fd: w)
+        #expect(!sink.peerClosed())
+        for start in stride(from: 0, to: audio.count, by: 9_600) {
+            try sink.send(audio.subdata(in: start..<min(start + 9_600, audio.count)))
+        }
+        sink.finish(timeout: 2)
+        Darwin.close(w)
+        #expect(await reader.value == audio)
+    }
+
+    @Test func aReaderThatGoesAwayIsSeenAndEndsIt() throws {
+        let (r, w) = try pipe()
+        defer { Darwin.close(w) }
+        let sink = PipeSink(fd: w)
+        try sink.send(Data([1, 2, 3, 4]))
+        #expect(!sink.peerClosed())
+        Darwin.close(r)
+        #expect(sink.peerClosed())
+        // EPIPE, not SIGPIPE (which would end the test run).
+        #expect(throws: PhoneSocket.Failure.closed) { try sink.send(Data(repeating: 0, count: 4_800)) }
+    }
+
+    @Test func closedIsClosed() throws {
+        let (r, w) = try pipe()
+        defer {
+            Darwin.close(r)
+            Darwin.close(w)
+        }
+        let sink = PipeSink(fd: w)
+        sink.close()
+        #expect(sink.peerClosed())
+        #expect(throws: PhoneSocket.Failure.closed) { try sink.send(Data([0, 0])) }
     }
 }
 

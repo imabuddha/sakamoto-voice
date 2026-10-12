@@ -1,9 +1,10 @@
-// app-voice-tap: streams the Claude desktop app's audio, live, to the Sakamoto Voice app on an
+// app-voice-tap: captures the Claude desktop app's audio, live, for the Sakamoto Voice app on an
 // iPhone (speak.py's `output app-phone`). See Options.usage, and README.md for the permission.
 //
-// Standard output gets two lines: "ready" once the phone has accepted the stream and the tap is
-// running (speak.py presses Read aloud then), and a one-line result at the end. Diagnostics go to
-// standard error.
+// Two status lines: "ready" once the tap is running (and, with --to, the phone has accepted the
+// stream; speak.py presses Read aloud then), and a one-line result at the end. With --stdout they
+// go to standard error, since standard output carries the audio; with --to, to standard output.
+// Diagnostics always go to standard error.
 
 import AppVoiceTapCore
 import CoreAudio
@@ -12,6 +13,9 @@ import SakamotoVoiceKit
 import Synchronization
 
 setvbuf(stdout, nil, _IOLBF, 0)
+// A reader that goes away must end the stream with an error from write, not kill the process
+// before it can remove its tap (PipeSink and PhoneSocket also turn SIGPIPE off on their own).
+signal(SIGPIPE, SIG_IGN)
 
 func warn(_ line: String) {
     FileHandle.standardError.write(Data("app-voice-tap: \(line)\n".utf8))
@@ -85,7 +89,7 @@ func checkPermission() -> Int32 {
 final class Streamer {
     let options: Options
     let matcher: ProcessMatcher
-    var socket: PhoneSocket?
+    var sink: AudioSink?
     var tap: AppTap?
     var gate: StreamGate?
     var resampler: Resampler?
@@ -99,16 +103,31 @@ final class Streamer {
         if options.verbose { warn(line) }
     }
 
+    /// A status line ("ready", the result): on standard output, unless that carries the audio.
+    func status(_ line: String) {
+        if options.toStdout {
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        } else {
+            print(line)
+        }
+    }
+
     /// Prints the result line and returns the exit status.
     func finish(_ status: Int32, _ line: String) -> Int32 {
         tap?.stop()
         tap = nil
-        socket?.close()
-        print(line)
+        sink?.close()
+        self.status(line)
         return status
     }
 
     var address: String { "\(options.host):\(options.port)" }
+    /// Where the audio goes, for the result line.
+    var destination: String { options.toStdout ? "standard output" : address }
+    /// What it means when the other end goes away.
+    var otherEndClosed: String {
+        options.toStdout ? "the reader closed standard output" : "the phone ended the stream (a newer message or Stop)"
+    }
 
     func claudeProcesses() -> [HAL.Process] {
         let me = getpid()
@@ -168,6 +187,33 @@ final class Streamer {
         }
     }
 
+    /// With --to: connects to the phone, which must accept the stream before anything is tapped.
+    /// Nil once it has; else the exit status (the result line printed).
+    func connectToPhone() -> Int32? {
+        var text = options.text
+        if options.textFromStdin {
+            text = String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
+        }
+        do {
+            let socket = try PhoneSocket.connect(host: options.host, port: options.port)
+            sink = socket
+            try socket.send(VoiceMessage.streamHeader(token: options.token, text: text, rate: options.rate))
+            let line = try socket.readLine(timeout: 4)
+            guard let ack = try? JSONDecoder().decode(Ack.self, from: line) else {
+                return finish(Exit.phone, "the phone at \(address) didn't answer properly")
+            }
+            guard ack.ok else {
+                return finish(Exit.phone, "the phone at \(address) refused the stream: \(ack.error ?? "?")")
+            }
+            note("the phone (\(ack.app) \(ack.version)) accepted the stream")
+            return nil
+        } catch .timeout {
+            return finish(Exit.phone, "the phone at \(address) didn't answer the stream (is its app 0.3.0 or later?)")
+        } catch {
+            return finish(Exit.phone, "the phone at \(address): \(error)")
+        }
+    }
+
     func run() -> Int32 {
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)
@@ -189,28 +235,10 @@ final class Streamer {
             }
         }
 
-        var text = options.text
-        if options.textFromStdin {
-            text = String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
-        }
-
-        // The phone first: it must accept the stream before anything is tapped.
-        do {
-            let socket = try PhoneSocket.connect(host: options.host, port: options.port)
-            self.socket = socket
-            try socket.send(VoiceMessage.streamHeader(token: options.token, text: text, rate: options.rate))
-            let line = try socket.readLine(timeout: 4)
-            guard let ack = try? JSONDecoder().decode(Ack.self, from: line) else {
-                return finish(Exit.phone, "the phone at \(address) didn't answer properly")
-            }
-            guard ack.ok else {
-                return finish(Exit.phone, "the phone at \(address) refused the stream: \(ack.error ?? "?")")
-            }
-            note("the phone (\(ack.app) \(ack.version)) accepted the stream")
-        } catch .timeout {
-            return finish(Exit.phone, "the phone at \(address) didn't answer the stream (is its app 0.3.0 or later?)")
-        } catch {
-            return finish(Exit.phone, "the phone at \(address): \(error)")
+        if options.toStdout {
+            sink = PipeSink()
+        } else if let failed = connectToPhone() {
+            return failed
         }
 
         let found = claudeProcesses()
@@ -227,18 +255,18 @@ final class Streamer {
             note("no Claude app process has used audio yet; tapping when one does")
         }
 
-        print("ready")
+        status("ready")
         let readyAt = Date()
         var lastScan = readyAt
         var line: (Int32, String)?
         while line == nil {
             if stopRequested.load(ordering: .relaxed) != 0 {
-                line = (Exit.ok, "stopped after streaming \(seconds) to \(address)")
+                line = (Exit.ok, "stopped after streaming \(seconds) to \(destination)")
                 break
             }
             usleep(20_000)
-            if socket?.peerClosed() ?? true {
-                line = (Exit.ok, "streamed \(seconds) to \(address); the phone ended the stream (a newer message or Stop)")
+            if sink?.peerClosed() ?? true {
+                line = (Exit.ok, "streamed \(seconds) to \(destination); \(otherEndClosed)")
                 break
             }
             let now = Date()
@@ -246,7 +274,7 @@ final class Streamer {
                 lastScan = now
                 rescan()
             }
-            if let tap, var gate, let resampler, let socket {
+            if let tap, var gate, let resampler, let sink {
                 let samples = tap.queue.drain()
                 if !samples.isEmpty {
                     let waiting = !gate.hasBegun
@@ -257,19 +285,20 @@ final class Streamer {
                     }
                     if !out.isEmpty {
                         do {
-                            try socket.send(PCM16.data(resampler.convert(out)))
+                            try sink.send(PCM16.data(resampler.convert(out)))
                         } catch .closed {
-                            line = (Exit.ok, "streamed \(seconds) to \(address); the phone ended the stream (a newer message or Stop)")
+                            line = (Exit.ok, "streamed \(seconds) to \(destination); \(otherEndClosed)")
                         } catch {
-                            line = (Exit.phone, "sending to the phone at \(address) failed after \(seconds): \(error)")
+                            line = (Exit.phone, "sending to \(options.toStdout ? "standard output" : "the phone at \(address)") "
+                                    + "failed after \(seconds): \(error)")
                         }
                     }
                 }
                 if case .ended(let reason) = gate.state, line == nil {
-                    try? socket.send(PCM16.data(resampler.flush()))
+                    try? sink.send(PCM16.data(resampler.flush()))
                     line = (Exit.ok, reason == .silence
-                        ? "streamed \(seconds) to \(address); the app went quiet"
-                        : "streamed \(seconds) to \(address); stopped at the \(Int(options.maxSeconds)) s limit")
+                        ? "streamed \(seconds) to \(destination); the app went quiet"
+                        : "streamed \(seconds) to \(destination); stopped at the \(Int(options.maxSeconds)) s limit")
                 }
             }
             if line == nil, gate?.hasBegun != true, now.timeIntervalSince(readyAt) > options.waitStart {
@@ -280,7 +309,7 @@ final class Streamer {
         tap?.stop()
         tap = nil
         if line?.0 == Exit.ok, stopRequested.load(ordering: .relaxed) == 0 {
-            socket?.finish()
+            sink?.finish(timeout: 2)
         }
         let (status, result) = line ?? (Exit.ok, "done")
         return finish(status, result)

@@ -2,8 +2,8 @@
 
     python3 -m unittest discover -s plugin/tests
 
-The settings, the pid file, and the log go to a temporary folder, never ~/.config. The one test
-with sockets uses the loopback interface and is skipped where it can't listen.
+The settings, the pid file, and the log go to a temporary folder, never ~/.config. The tests
+with a stand-in phone use the loopback interface and are skipped where they can't listen.
 """
 import base64, io, json, os, socket, sys, tempfile, threading, unittest, wave
 from contextlib import redirect_stdout
@@ -366,10 +366,9 @@ class ServerStub:
 
 
 def closed_port():
-    s = socket.socket()
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        port = s.getsockname()[1]
     return f'127.0.0.1:{port}'
 
 
@@ -597,21 +596,35 @@ class SpeakerTests(Isolated):
 # ---- output app-phone ------------------------------------------------------------------------
 
 FAKE_TAP = r'''#!/bin/sh
-# A stand-in for app-voice-tap: records its arguments and standard input, then acts out $MODE.
+# A stand-in for app-voice-tap --stdout: records its arguments, then acts out $MODE, with the
+# audio ($DIR/audio) on standard output and its status lines on standard error.
 printf '%s\n' "$@" > "$DIR/args"
-cat > "$DIR/stdin"
 case "$MODE" in
-  ok)      echo ready; echo "streamed 3.2 s to phone:47811; the app went quiet"; exit 0 ;;
-  refused) echo "the phone at phone:47811 refused the stream: bad token"; exit 4 ;;
-  silent)  echo ready; echo "no sound from the Claude app within 10.0 s"; exit 6 ;;
-  hang)    echo ready; exec sleep 30 ;;
-  mute)    exec sleep 30 ;;
+  ok)       echo ready >&2; cat "$DIR/audio"; echo "streamed 1.0 s to standard output; the app went quiet" >&2; exit 0 ;;
+  refused)  echo "System Audio Recording is off for app-voice-tap" >&2; exit 3 ;;
+  silent)   echo ready >&2; echo "no sound from the Claude app within 10.0 s" >&2; exit 6 ;;
+  hang)     echo ready >&2; exec sleep 30 ;;
+  endless)  echo ready >&2; while cat "$DIR/audio"; do :; done; exit 0 ;;
+  mute)     exec sleep 30 ;;
 esac
 '''
 
+AUDIO = bytes(range(256)) * 188          # 48,128 bytes: about a second at 24 kHz
 
-class TapTests(Isolated):
-    """The Tap wrapper with a shell script standing in for app-voice-tap (no audio)."""
+
+def drain(sock, into):
+    """Reads `sock` to its end into the bytearray `into` (in a thread), then closes it."""
+    def run():
+        with sock:
+            while chunk := sock.recv(65536):
+                into.extend(chunk)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+class FakeToolCase(Isolated):
+    """A shell script standing in for app-voice-tap (no audio is captured)."""
 
     def setUp(self):
         super().setUp()
@@ -619,47 +632,112 @@ class TapTests(Isolated):
         with open(self.tool, 'w') as f:
             f.write(FAKE_TAP)
         os.chmod(self.tool, 0o755)
+        with open(os.path.join(self.dir.name, 'audio'), 'wb') as f:
+            f.write(AUDIO)
 
-    def tap(self, mode, text='Hello 囲碁'):
-        with mock.patch.dict(os.environ, {'MODE': mode, 'DIR': self.dir.name}):
-            return speak.Tap(self.tool, 'phone.local:47811', '123456', text)
+    def mode(self, mode):
+        """The environment in which the tool (started meanwhile) acts out `mode`."""
+        return mock.patch.dict(os.environ, {'MODE': mode, 'DIR': self.dir.name})
+
+    def tap(self, mode):
+        with self.mode(mode):
+            tap = speak.Tap(self.tool)
+        self.addCleanup(lambda: tap.proc.poll() is None and tap.proc.kill())
+        return tap
 
     def read(self, name):
         with open(os.path.join(self.dir.name, name), encoding='utf-8') as f:
             return f.read()
 
-    def test_a_reading(self):
+
+class TapTests(FakeToolCase):
+    """The Tap wrapper, relaying into a local socket pair."""
+
+    def pair(self):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        return a, b
+
+    def test_a_reading_is_relayed_whole(self):
         tap = self.tap('ok')
         self.assertTrue(tap.wait_ready())
-        self.assertEqual(tap.finish(timeout=5), (0, 'streamed 3.2 s to phone:47811; the app went quiet'))
         self.assertEqual(self.read('args').split('\n')[:-1],
-                         ['--to', 'phone.local:47811', '--token', '123456', '--mute', '--text-stdin',
-                          '--wait-start', str(speak.TAP_WAIT_START), '--max-seconds', str(speak.TAP_MAX_SECONDS)])
-        self.assertEqual(self.read('stdin'), 'Hello 囲碁')
+                         ['--stdout', '--mute', '--rate', str(speak.STREAM_RATE), '--wait-start',
+                          str(speak.TAP_WAIT_START), '--max-seconds', str(speak.TAP_MAX_SECONDS)])
+        mine, phone = self.pair()
+        received = bytearray()
+        reader = drain(phone, received)
+        self.assertIsNone(tap.relay(mine, timeout=10))
+        self.assertEqual(tap.stop(), 0)
+        self.assertEqual(tap.last_line(), 'streamed 1.0 s to standard output; the app went quiet')
+        speak.end_stream(mine)
+        reader.join(5)
+        self.assertEqual(bytes(received), AUDIO)
+        self.assertAlmostEqual(tap.seconds, len(AUDIO) / 48000)
 
     def test_refused_before_ready(self):
         tap = self.tap('refused')
         self.assertFalse(tap.wait_ready(timeout=5))
-        self.assertEqual(tap.stop(), 4)
-        self.assertEqual(tap.last_line(), 'the phone at phone:47811 refused the stream: bad token')
+        self.assertEqual(tap.stop(grace=0), 3)
+        self.assertEqual(tap.last_line(), 'System Audio Recording is off for app-voice-tap')
 
     def test_no_sound(self):
         tap = self.tap('silent')
         self.assertTrue(tap.wait_ready())
-        self.assertEqual(tap.finish(timeout=5), (speak.TAP_NO_SOUND, 'no sound from the Claude app within 10.0 s'))
+        self.assertIsNone(tap.relay(self.pair()[0], timeout=5))
+        self.assertEqual(tap.stop(), speak.TAP_NO_SOUND)
+        self.assertEqual(tap.last_line(), 'no sound from the Claude app within 10.0 s')
+        self.assertEqual(tap.sent, 0)
 
     def test_never_ready_is_stopped(self):
         tap = self.tap('mute')
         self.assertFalse(tap.wait_ready(timeout=0.3))
-        self.assertLess(tap.stop(), 0)          # terminated
+        self.assertLess(tap.stop(grace=0), 0)          # terminated
         self.assertEqual(tap.last_line(), 'no output')
 
-    def test_finish_stops_it_when_it_runs_too_long(self):
+    def test_a_relay_that_runs_too_long_is_cut_short(self):
         tap = self.tap('hang')
         self.assertTrue(tap.wait_ready())
-        status, line = tap.finish(timeout=0.3)
-        self.assertLess(status, 0)
-        self.assertEqual(line, 'no output')
+        self.assertEqual(tap.relay(self.pair()[0], timeout=0.3), 'still going after 0 s')
+        self.assertLess(tap.stop(grace=0), 0)
+
+    def test_the_phone_closing_cuts_it_short(self):
+        tap = self.tap('hang')
+        self.assertTrue(tap.wait_ready())
+        mine, phone = self.pair()
+        phone.close()                                   # a newer message, or Stop
+        self.assertEqual(tap.relay(mine, timeout=5), 'the phone ended the stream (a newer message or Stop)')
+        self.assertLess(tap.stop(grace=0), 0)
+
+    def test_a_phone_that_takes_nothing_is_given_up_on(self):
+        tap = self.tap('endless')
+        self.assertTrue(tap.wait_ready())
+        mine, _ = self.pair()                           # nobody reads the other end
+        mine.settimeout(0.2)
+        self.assertTrue(tap.relay(mine, timeout=10).startswith('the phone took no audio'))
+        self.assertLess(tap.stop(grace=0), 0)
+
+    def test_the_tool_ends_when_nobody_reads_its_audio(self):
+        # What happens when the speaker dies: the pipe closes, writing fails, and the tool exits.
+        tap = self.tap('endless')
+        self.assertTrue(tap.wait_ready())
+        tap.proc.stdout.close()
+        tap.proc.wait(5)
+        tap.proc.stderr.close()
+        self.assertIsNotNone(tap.proc.returncode)
+
+
+class StreamHeaderTests(unittest.TestCase):
+    def test_as_the_kit_makes_it(self):
+        self.assertEqual(speak.stream_header('123456', 'Hello.'),
+                         b'{"channels":1,"format":"pcm16","kind":"stream","rate":24000,"text":"Hello.","token":"123456"}\n')
+
+    def test_no_text_and_utf8(self):
+        self.assertEqual(json.loads(speak.stream_header('123456')),
+                         {'channels': 1, 'format': 'pcm16', 'kind': 'stream', 'rate': 24000, 'token': '123456'})
+        self.assertIn('囲碁'.encode(), speak.stream_header('123456', '囲碁'))
+        self.assertEqual(speak.stream_header('1', 'a\nb').count(b'\n'), 1)     # one line, whatever the text
 
 
 class TapPathTests(Isolated):
@@ -688,24 +766,27 @@ class TapPathTests(Isolated):
 
 
 class FakeTap:
-    """Stands in for speak.Tap (calling it "starts" it): `ready`, then `status` and `line`."""
+    """Stands in for speak.Tap (calling it "starts" it): `ready`, then `relay`'s answer `cut`,
+    the exit `status`, and its `line`."""
 
-    def __init__(self, ready=True, status=0, line='streamed 3.2 s to phone:47811; the app went quiet'):
-        self.ready, self.status, self.line = ready, status, line
-        self.stopped = False
+    def __init__(self, ready=True, cut=None, status=0, line='streamed 3.2 s to standard output; the app went quiet'):
+        self.ready, self.cut, self.status, self.line = ready, cut, status, line
+        self.stopped = self.relayed = None
+        self.seconds = 3.2
 
-    def __call__(self, path, address, token, text):
-        self.args = (path, address, token, text)
+    def __call__(self, path):
+        self.path = path
         return self
 
     def wait_ready(self):
         return self.ready
 
-    def finish(self, timeout):
-        return self.status, self.line
+    def relay(self, sock, timeout):
+        self.relayed = sock
+        return self.cut
 
-    def stop(self):
-        self.stopped = True
+    def stop(self, grace=3.0):
+        self.stopped = grace
         return self.status
 
     def last_line(self):
@@ -717,79 +798,243 @@ class AppPhoneTests(Isolated):
 
     CFG = dict(speak.DEFAULTS, output='app-phone', phone_token='123456', phone='old.local:47811')
 
-    def run_app_phone(self, tap=None, clicked=True, ping={'ok': True}, path='/bin/app-voice-tap', cfg=None,
-                      phone_now='Example-iPhone.local:47811'):
+    def run_app_phone(self, tap=None, clicked=True, opened='ok', path='/bin/app-voice-tap', cfg=None):
         cfg = cfg or dict(self.CFG)
-        self.write_config(dict(cfg, phone=phone_now))       # as send_to_phone may have found it again
+        self.write_config(cfg)
         tap = tap or FakeTap()
+        self.sock = mock.Mock()
+        if opened == 'ok':
+            opened = (self.sock, {'ok': True, 'app': 'Sakamoto Voice', 'version': '0.3.0'})
+        elif isinstance(opened, dict) or opened == 'silent':
+            opened = (self.sock, None if opened == 'silent' else opened)
         with mock.patch.object(speak, 'tap_path', return_value=path), \
              mock.patch.object(speak, 'Tap', tap), \
-             mock.patch.object(speak, 'send_to_phone', return_value=ping) as send, \
+             mock.patch.object(speak, 'reach_phone', return_value=opened) as reach, \
+             mock.patch.object(speak, 'open_stream') as open_stream, \
+             mock.patch.object(speak, 'end_stream') as end_stream, \
              mock.patch.object(speak, 'app_read', return_value=clicked) as click, \
              mock.patch.object(speak, 'deliver_to_phone') as deliver:
             speak.app_phone(cfg, 'Hello 囲碁', 'Hello 囲碁', [('default', 'Hello'), ('ja', '囲碁')], [('en', 'Hello')], set())
-        return tap, send, click, deliver
+            if reach.called:
+                reach.call_args[0][0]('Example-iPhone.local:47811')      # what it tries at an address
+                self.opened_with = open_stream.call_args[0]
+        self.end_stream = end_stream
+        return tap, reach, click, deliver
 
     def assert_text_fallback(self, deliver):
         cfg, text, runs, _, _ = deliver.call_args[0]
         self.assertEqual((cfg['phone_mode'], text, runs), ('text', 'Hello 囲碁', [('default', 'Hello'), ('ja', '囲碁')]))
 
     def test_the_apps_voice_is_streamed(self):
-        tap, send, click, deliver = self.run_app_phone()
-        self.assertEqual(json.loads(send.call_args[0][0])['kind'], 'ping')
-        self.assertEqual(tap.args, ('/bin/app-voice-tap', 'Example-iPhone.local:47811', '123456', 'Hello 囲碁'))
+        tap, reach, click, deliver = self.run_app_phone()
+        self.assertEqual(self.opened_with, ('Example-iPhone.local:47811', speak.stream_header('123456', 'Hello 囲碁')))
+        self.assertEqual(tap.path, '/bin/app-voice-tap')
+        self.assertIs(tap.relayed, self.sock)
         self.assertLessEqual(click.call_args.kwargs['delay'], speak.APP_READ_DELAY)   # less the time spent
+        self.end_stream.assert_called_once_with(self.sock)
         deliver.assert_not_called()
-        self.assertIn('app-phone: streamed 3.2 s', self.log_text())
+        self.assertIn('app-phone: 3.2 s to the phone; app-voice-tap: streamed 3.2 s', self.log_text())
 
     def test_debugger_off_sends_the_text(self):
         tap, _, _, deliver = self.run_app_phone(clicked=False)
-        self.assertTrue(tap.stopped)
+        self.assertEqual(tap.stopped, 0)
+        self.assertIsNone(tap.relayed)
+        self.sock.close.assert_called()
         self.assert_text_fallback(deliver)
         self.assertIn("debugger is off", self.log_text())
 
     def test_a_tap_that_does_not_start_sends_the_text(self):
         tap, _, click, deliver = self.run_app_phone(FakeTap(ready=False, status=3, line='System Audio Recording is off'))
         click.assert_not_called()
-        self.assertTrue(tap.stopped)
+        self.assertEqual(tap.stopped, 0)
+        self.sock.close.assert_called()
         self.assert_text_fallback(deliver)
         self.assertIn('did not start: System Audio Recording is off', self.log_text())
 
+    def test_a_tool_that_cannot_run_sends_the_text(self):
+        def broken(path):
+            raise PermissionError('not executable')
+        _, _, click, deliver = self.run_app_phone(broken)
+        click.assert_not_called()
+        self.sock.close.assert_called()
+        self.assert_text_fallback(deliver)
+        self.assertIn('did not start: not executable', self.log_text())
+
     def test_no_sound_sends_the_text(self):
         _, _, _, deliver = self.run_app_phone(FakeTap(status=speak.TAP_NO_SOUND, line='no sound'))
+        self.sock.close.assert_called()
+        self.end_stream.assert_not_called()
         self.assert_text_fallback(deliver)
+        self.assertIn('no sound from the Claude app (no sound)', self.log_text())
 
     def test_not_built_sends_the_text(self):
-        _, send, click, deliver = self.run_app_phone(path=None)
-        send.assert_not_called()
+        _, reach, click, deliver = self.run_app_phone(path=None)
+        reach.assert_not_called()
         click.assert_not_called()
         self.assert_text_fallback(deliver)
         self.assertIn('mac/build.sh', self.log_text())
 
     def test_no_phone_reads_nothing_aloud(self):
-        tap, _, click, deliver = self.run_app_phone(ping=None)
+        tap, _, click, deliver = self.run_app_phone(opened=None)
         click.assert_not_called()
         deliver.assert_not_called()
-        self.assertFalse(hasattr(tap, 'args'))
+        self.assertFalse(hasattr(tap, 'path'))
         self.assertIn('the phone did not answer (unreachable)', self.log_text())
 
-    def test_a_refused_ping_reads_nothing_aloud(self):
-        _, _, click, deliver = self.run_app_phone(ping={'ok': False, 'error': 'bad token'})
+    def test_a_refused_stream_reads_nothing_aloud(self):
+        tap, _, click, deliver = self.run_app_phone(opened={'ok': False, 'error': 'bad token'})
         click.assert_not_called()
         deliver.assert_not_called()
-        self.assertIn('(bad token)', self.log_text())
+        self.assertFalse(hasattr(tap, 'path'))
+        self.sock.close.assert_called()
+        self.assertIn('refused the stream (bad token)', self.log_text())
 
-    def test_a_failure_mid_stream_is_only_logged(self):
-        _, _, _, deliver = self.run_app_phone(FakeTap(status=4, line='sending to the phone failed'))
+    def test_an_old_phone_gets_the_text(self):
+        tap, _, click, deliver = self.run_app_phone(opened='silent')
+        click.assert_not_called()
+        self.assertFalse(hasattr(tap, 'path'))
+        self.sock.close.assert_called()
+        self.assert_text_fallback(deliver)
+        self.assertIn('is its app 0.3.0 or later?', self.log_text())
+
+    def test_the_phone_ending_it_is_only_logged(self):
+        tap, _, _, deliver = self.run_app_phone(FakeTap(cut='the phone ended the stream (a newer message or Stop)'))
+        self.assertEqual(tap.stopped, 0)
+        self.end_stream.assert_not_called()
+        self.sock.close.assert_called()
         deliver.assert_not_called()
-        self.assertIn('status 4: sending to the phone failed', self.log_text())
+        self.assertIn('app-phone: the phone ended the stream (a newer message or Stop), after 3.2 s', self.log_text())
+
+    def test_a_tool_failure_mid_stream_is_only_logged(self):
+        _, _, _, deliver = self.run_app_phone(FakeTap(status=5, line="couldn't tap the Claude app"))
+        deliver.assert_not_called()
+        self.assertIn("status 5: couldn't tap the Claude app", self.log_text())
 
     def test_unpaired(self):
-        _, send, click, deliver = self.run_app_phone(cfg=dict(self.CFG, phone_token=''))
-        send.assert_not_called()
+        _, reach, click, deliver = self.run_app_phone(cfg=dict(self.CFG, phone_token=''))
+        reach.assert_not_called()
         click.assert_not_called()
         deliver.assert_not_called()
         self.assertIn('not paired', self.log_text())
+
+
+class StreamPhone:
+    """A stand-in phone for streams on the loopback interface: for each connection it reads the
+    header line, answers it with `reply` (or, as phones before 0.3.0, not at all), then keeps the
+    audio until the sender closes, and closes."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.headers, self.audio = [], []
+        self.done = threading.Event()
+        self.sock = socket.socket()
+        try:
+            self.sock.bind(('127.0.0.1', 0))
+            self.sock.listen()
+        except OSError:
+            self.sock.close()
+            raise
+        self.address = f'127.0.0.1:{self.sock.getsockname()[1]}'
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                data = b''
+                while b'\n' not in data and (chunk := conn.recv(4096)):
+                    data += chunk
+                header, _, audio = data.partition(b'\n')
+                self.headers.append(json.loads(header))
+                if self.reply is None:
+                    conn.recv(1)                 # waits for the sender to give up
+                    continue
+                conn.sendall(json.dumps(self.reply).encode() + b'\n')
+                if not self.reply.get('ok'):
+                    continue
+                while chunk := conn.recv(65536):
+                    audio += chunk
+                self.audio.append(audio)
+                self.done.set()
+
+    def close(self):
+        self.sock.close()
+
+
+class StreamTests(FakeToolCase):
+    """app-phone over the loopback interface: speak.py's side of the stream, with the fake tool."""
+
+    def phone(self, reply={'ok': True, 'app': 'Sakamoto Voice', 'version': 'test'}):
+        try:
+            phone = StreamPhone(reply)
+        except OSError as e:
+            self.skipTest(f'cannot listen here: {e}')
+        self.addCleanup(phone.close)
+        return phone
+
+    def test_open_stream(self):
+        phone = self.phone()
+        sock, ack = speak.open_stream(phone.address, speak.stream_header('123456', 'Hi'))
+        speak.end_stream(sock)
+        self.assertTrue(ack['ok'])
+        self.assertEqual(phone.headers, [{'channels': 1, 'format': 'pcm16', 'kind': 'stream', 'rate': 24000,
+                                          'text': 'Hi', 'token': '123456'}])
+
+    def test_a_refusal(self):
+        phone = self.phone({'ok': False, 'error': 'bad token'})
+        sock, ack = speak.open_stream(phone.address, speak.stream_header('111111'))
+        sock.close()
+        self.assertEqual(ack['error'], 'bad token')
+
+    def test_an_old_phone_does_not_answer(self):
+        phone = self.phone(None)
+        sock, ack = speak.open_stream(phone.address, speak.stream_header('123456'), timeout=0.3)
+        sock.close()
+        self.assertIsNone(ack)
+
+    def test_nobody_listening(self):
+        self.phone()                                    # skipped where it can't listen
+        with self.assertRaises(OSError):
+            speak.open_stream(closed_port(), speak.stream_header('123456'))
+
+    def run_app_phone(self, mode, phone, remembered=None):
+        cfg = dict(speak.DEFAULTS, output='app-phone', phone_token='123456', phone=remembered or phone.address)
+        self.write_config(cfg)
+        with self.mode(mode), \
+             mock.patch.object(speak, 'tap_path', return_value=self.tool), \
+             mock.patch.object(speak, 'find_phone', return_value=('iPhone', phone.address)) as find, \
+             mock.patch.object(speak, 'app_read', return_value=True), \
+             mock.patch.object(speak, 'deliver_to_phone') as deliver:
+            speak.app_phone(cfg, 'Hello', 'Hello', [('default', 'Hello')], [('en', 'Hello')], set())
+        return find, deliver
+
+    def test_the_tools_audio_reaches_the_phone(self):
+        phone = self.phone()
+        find, deliver = self.run_app_phone('ok', phone)
+        self.assertTrue(phone.done.wait(5))
+        self.assertEqual(phone.headers[0]['text'], 'Hello')
+        self.assertEqual(phone.audio, [AUDIO])
+        find.assert_not_called()
+        deliver.assert_not_called()
+        self.assertIn('app-phone: 1.0 s to the phone; app-voice-tap: streamed 1.0 s', self.log_text())
+
+    def test_a_phone_that_moved_is_found_again(self):
+        phone = self.phone()
+        find, _ = self.run_app_phone('ok', phone, remembered=closed_port())
+        self.assertTrue(phone.done.wait(5))
+        find.assert_called_once_with('123456')
+        self.assertEqual(self.read_config()['phone'], phone.address)
+        self.assertEqual(phone.audio, [AUDIO])
+
+    def test_no_sound_closes_the_stream_and_sends_the_text(self):
+        phone = self.phone()
+        _, deliver = self.run_app_phone('silent', phone)
+        self.assertTrue(phone.done.wait(5))
+        self.assertEqual(phone.audio, [b''])
+        deliver.assert_called_once()
 
 
 class AppPhoneCommandTests(Isolated):
