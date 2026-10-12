@@ -1229,6 +1229,7 @@ def main():
     if text and nothing_to_say(text):
         # "08:31 …": she had nothing to say. Speaking it would only cut off a reading in progress.
         log('response: nothing to say; the voice carries on')
+        touch(RESPONDED)    # still a response: Sakamoto Eyes opens a follow-up window on it
         return 0
     prompted = not os.path.exists(PROMPTED) or not os.path.exists(RESPONDED) or \
         os.path.getmtime(PROMPTED) >= os.path.getmtime(RESPONDED)
