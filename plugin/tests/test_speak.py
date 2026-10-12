@@ -38,7 +38,8 @@ class Isolated(unittest.TestCase):
         home = self.dir.name
         patches = {'HOME': home, 'CONFIG': os.path.join(home, 'config.json'),
                    'PIDFILE': os.path.join(home, 'speaker.pid'), 'LOG': os.path.join(home, 'speak.log'),
-                   'PROMPTED': os.path.join(home, 'prompted'), 'RESPONDED': os.path.join(home, 'responded')}
+                   'PROMPTED': os.path.join(home, 'prompted'), 'RESPONDED': os.path.join(home, 'responded'),
+                   'RECORDINGS': os.path.join(home, 'recordings')}
         for name, value in patches.items():
             p = mock.patch.object(speak, name, value)
             p.start()
@@ -798,7 +799,8 @@ class FakeTap:
     def wait_ready(self):
         return self.ready
 
-    def relay(self, sock, timeout):
+    def relay(self, sock, timeout, record=None):
+        self.record = record
         self.relayed = sock
         return self.cut
 
@@ -1337,3 +1339,20 @@ class PhoneVoiceRoutingTests(Isolated):
         run, deliver = self.run_speaker({'output': 'both', 'phone_voice': 'text', 'default_lang': 'en'})
         self.assertEqual(run.call_count, 2)
         deliver.assert_called_once()
+
+
+class Recordings(Isolated):
+    """The last two streamed readings are kept, with their text."""
+
+    def test_rotation_keeps_two(self):
+        for n in (1, 2, 3):
+            path = speak.recording_path(f'reply {n}')
+            with wave.open(path, 'wb') as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(speak.STREAM_RATE)
+                w.writeframes(b'\0\0' * n)
+        names = sorted(os.listdir(speak.RECORDINGS))
+        self.assertEqual(names, ['latest.txt', 'latest.wav', 'previous.txt', 'previous.wav'])
+        with open(os.path.join(speak.RECORDINGS, 'latest.txt'), encoding='utf-8') as f:
+            self.assertTrue(f.read().endswith('reply 3'))
+        with wave.open(os.path.join(speak.RECORDINGS, 'previous.wav')) as w:
+            self.assertEqual(w.getnframes(), 2)

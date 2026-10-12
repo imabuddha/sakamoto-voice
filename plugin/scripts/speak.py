@@ -777,10 +777,28 @@ class Tap:
         """How much audio has been passed on, in seconds."""
         return self.sent / 2 / STREAM_RATE
 
-    def relay(self, sock, timeout):
+    def relay(self, sock, timeout, record=None):
         """Passes its audio on to the phone until it ends it (closing its standard output), the
         phone closes the stream, sending fails, or `timeout` seconds pass. None when it ended by
-        itself; else why the stream was cut short (it may still be running: stop() it)."""
+        itself; else why the stream was cut short (it may still be running: stop() it). With
+        `record`, a WAV path, the audio is also kept there."""
+        wav = None
+        if record:
+            try:
+                wav = wave.open(record, 'wb')
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(STREAM_RATE)
+            except OSError as e:
+                log(f'recording: {e}')
+                wav = None
+        try:
+            return self._relay(sock, timeout, wav)
+        finally:
+            if wav:
+                wav.close()
+
+    def _relay(self, sock, timeout, wav):
         out, err = self.proc.stdout.fileno(), self.proc.stderr.fileno()
         watched = [out, err, sock]
         end = time.monotonic() + timeout
@@ -803,6 +821,8 @@ class Tap:
                 if not chunk:
                     watched.remove(out)
                     continue
+                if wav:
+                    wav.writeframes(chunk)
                 try:
                     sock.sendall(chunk)
                 except socket.timeout:
@@ -838,6 +858,27 @@ class Tap:
         self.proc.stdout.close()
         self.proc.stderr.close()
         return self.proc.returncode
+
+
+RECORDINGS = os.path.join(HOME, 'recordings')
+
+
+def recording_path(text):
+    """Where this reading is kept: recordings/latest.wav (with latest.txt, the response), after the
+    one before moves to previous.*. Only the last two are ever kept, for checking what the app's
+    voice actually said."""
+    try:
+        os.makedirs(RECORDINGS, exist_ok=True)
+        for ext in ('wav', 'txt'):
+            latest = os.path.join(RECORDINGS, f'latest.{ext}')
+            if os.path.exists(latest):
+                os.replace(latest, os.path.join(RECORDINGS, f'previous.{ext}'))
+        with open(os.path.join(RECORDINGS, 'latest.txt'), 'w', encoding='utf-8') as f:
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S') + '\n\n' + text)
+        return os.path.join(RECORDINGS, 'latest.wav')
+    except OSError as e:
+        log(f'recording: {e}')
+        return None
 
 
 def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
@@ -896,7 +937,7 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
             tap.stop(grace=0)
             sock.close()
             return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found", 'not-clicked')
-        cut = tap.relay(sock, timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30)
+        cut = tap.relay(sock, timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30, record=recording_path(raw))
         status = tap.stop(grace=0 if cut else 3.0)
     except BaseException:
         tap.stop(grace=0)
