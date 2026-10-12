@@ -75,7 +75,7 @@ so (when it started, about when it ends, and the text), for Sakamoto Eyes, which
 speaker.pid otherwise; the next response, stop, and hush remove it.
 """
 import base64, json, os, pty, re, select, shutil, signal, socket, subprocess, sys, tempfile, threading
-import time, wave
+import time, unicodedata, wave
 
 HOME = os.path.expanduser('~/.config/sakamoto-voice')
 CONFIG = os.path.join(HOME, 'config.json')
@@ -647,8 +647,15 @@ def touch(path):
 
 
 def nothing_to_say(text):
-    """A response that is only an ellipsis, after an optional time ("08:31 …")."""
-    return re.fullmatch(r'\s*(\d{1,2}:\d{2}\s*)?(…|\.\.\.)\s*', text) is not None
+    """A response that is only an ellipsis or an emoji or two, after an optional time ("08:31 …",
+    "08:31 🦉")."""
+    rest = re.sub(r'^\s*\d{1,2}:\d{2}', '', text).strip()
+    if rest in ('…', '...'):
+        return True
+    # Emoji: symbols (So), with their joiners, variation selectors, and skin tones.
+    glue = {'\u200d', '\ufe0f', '\ufe0e', '\u20e3'}
+    symbols = [c for c in rest if c not in glue and not 0x1F3FB <= ord(c) <= 0x1F3FF]
+    return 0 < len(symbols) <= 3 and all(unicodedata.category(c) == 'So' for c in symbols)
 
 
 def launch(text, prompted=True):
