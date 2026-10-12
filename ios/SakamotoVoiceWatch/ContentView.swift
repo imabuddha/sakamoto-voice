@@ -1,3 +1,4 @@
+import AVFoundation
 import SakamotoVoiceKit
 import SwiftUI
 
@@ -34,6 +35,7 @@ struct ContentView: View {
                 } footer: {
                     Text("Reads each new message aloud as it arrives while this app is in front.")
                 }
+                VoicesSection()
                 if !model.messages.isEmpty {
                     Section {
                         Button("Clear", role: .destructive) { model.clear() }
@@ -111,5 +113,41 @@ private struct EmptyState: View {
         }
         .frame(maxWidth: .infinity)
         .listRowBackground(Color.clear)
+    }
+}
+
+/// The voices the watch reads with: any installed English and Japanese voice (premium and enhanced
+/// ones too, such as those downloaded under Accessibility › Live Speech), or Best, the highest
+/// quality installed.
+private struct VoicesSection: View {
+    @AppStorage(WatchSpeaker.englishChoiceKey) private var english = ""
+    @AppStorage(WatchSpeaker.japaneseChoiceKey) private var japanese = ""
+
+    var body: some View {
+        Section {
+            picker("English", selection: $english, voices: WatchSpeaker.voices("en"))
+            picker("Japanese", selection: $japanese, voices: WatchSpeaker.voices("ja"))
+        } header: {
+            Text("Voices")
+        } footer: {
+            Text("Best uses the highest-quality voice installed on the watch.")
+        }
+    }
+
+    private func picker(_ title: String, selection: Binding<String>, voices: [AVSpeechSynthesisVoice]) -> some View {
+        Picker(title, selection: selection) {
+            Text("Best").tag("")
+            ForEach(voices, id: \.identifier) { voice in
+                Text(label(voice)).tag(voice.identifier)
+            }
+        }
+    }
+
+    private func label(_ voice: AVSpeechSynthesisVoice) -> String {
+        switch voice.quality {
+        case .premium: "\(voice.name) (Premium)"
+        case .enhanced: "\(voice.name) (Enhanced)"
+        default: voice.name
+        }
     }
 }
