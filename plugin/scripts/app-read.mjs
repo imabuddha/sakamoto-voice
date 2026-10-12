@@ -46,7 +46,7 @@ const inPage = `(async () => {
       // block also holds earlier text (a turn that followed a notice, not a new message), which the
       // app would read again first: don't press; the Mac's or the phone's voices read the reply.
       const at = key ? text.indexOf(key) : 0;
-      if (at > EARLIER_TEXT) return 'earlier text first (' + at + ' chars before this reply)';
+      if (at > EARLIER_TEXT) return 'earlier text first (' + at + ' chars before this reply: ' + text.slice(0, Math.min(at, 40)) + ')';
       button.dataset.sakamotoRead = text.slice(0, 80);
       button.click();
       return 'clicked' + (key ? ' (at ' + at + ' of ' + text.length + ')' : '');
