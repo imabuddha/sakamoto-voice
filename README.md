@@ -2,7 +2,8 @@
 
 Sakamoto Voice reads Claude Code's replies aloud. When a response finishes, it speaks it on your
 Mac with macOS `say`, on an iPhone running the small **Sakamoto Voice** app (an old iPhone on a
-stand in another room works well), or on both. Japanese is read in a Japanese voice and everything
+stand in another room works well), or on both, and the phone can pass each one on to an Apple
+Watch. Japanese is read in a Japanese voice and everything
 else in your default voice, and a response can switch voices with simple markers. Experimental
 modes have the Claude desktop app read the response in its own voice, on the Mac or streamed live
 to the phone.
@@ -16,7 +17,8 @@ It has four parts:
 - `plugin/`: the Claude Code plugin (Stop and UserPromptSubmit hooks, in Python, with no packages
   to install);
 - `bin/sakamoto`: a command for switching it on and off, choosing where it speaks, and pairing;
-- `ios/`: the iPhone app (SwiftUI) and `SakamotoVoiceKit`, its tested core;
+- `ios/`: the iPhone app and its Apple Watch app (SwiftUI) and `SakamotoVoiceKit`, their tested
+  core;
 - `mac/AppVoiceTap`: `app-voice-tap`, a capture tool for the experimental phone mode.
 
 ## Requirements
@@ -27,6 +29,8 @@ It has four parts:
 - For the **iPhone app**: an iPhone with iOS 18 or later, Xcode 26 or later (the icon is an Icon
   Composer document), [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`),
   and an Apple Developer account to sign it (a free one works, with a shorter-lived profile).
+- For the **Apple Watch app** (optional): an Apple Watch with watchOS 11 or later, paired with that
+  iPhone.
 - For the **experimental app modes**: the Claude desktop app and Node.js 22 or later (`node`).
   `output app-phone` also needs `app-voice-tap`, built with Xcode's Swift toolchain.
 
@@ -178,6 +182,10 @@ Voice (`ios/`), and the Mac sends it each response over the local network. The a
   speaks only while it's open, and after the end time it has to be opened again to wake it. Calls
   and alarms interrupt it; it restarts when they end. Other apps' music plays on alongside it.
 - **Keeps the screen on** while it's open (on by default; for the stand).
+- **Passes messages on to an Apple Watch** (below), when the watch app is installed.
+
+Before the first message it shows the pairing code, how to pair, and, small at the bottom, the
+installed version ("Sakamoto Voice 1.1 (9)"); Settings → About shows it too.
 
 It runs on iOS 18 and later, so older phones such as the iPhone XS can serve as speakers.
 
@@ -197,9 +205,10 @@ Once per clone, set up signing:
 
        DEVELOPMENT_TEAM = ABCDE12345
 
-2. Give the app a bundle ID of your own: in `ios/project.yml`, change `PRODUCT_BUNDLE_IDENTIFIER`
-   (`com.pragmaphilia.SakamotoVoice`) and `bundleIdPrefix` to your own reverse-DNS name. Bundle IDs
-   are unique across all teams, so the one in the repository can't be registered by yours.
+2. Give the app a bundle ID of your own: in `ios/project.yml`, change `APP_BUNDLE_ID`
+   (`com.pragmaphilia.SakamotoVoice`; the watch app's is the same plus `.watchkitapp`) and
+   `bundleIdPrefix` to your own reverse-DNS name. Bundle IDs are unique across all teams, so the
+   one in the repository can't be registered by yours.
 
 Then build and install it:
 
@@ -238,6 +247,125 @@ drawn by a script, which you can edit and run (offscreen; needs Pillow and NumPy
     python3 ios/scripts/make-icon.py --preview icon.png    # rewrites AppIcon.icon; --preview is optional
 
 `--preview` also writes the composed icon, flat, with rounded corners, for a look.
+
+## The Apple Watch app
+
+For when the phone isn't in your pocket: taking out the recycling, say, with the phone left in the
+house on its stand. The iPhone app passes each message on to **Sakamoto Voice on the watch**, which
+lists it and reads it aloud in the watch's own voices. The watch can't take anything from the Mac
+itself (below), so the phone relays: over Bluetooth, or the home Wi-Fi when the watch is out of
+Bluetooth range, as Apple's WatchConnectivity and notification forwarding choose.
+
+**On the phone**, Settings → Apple Watch (shown when a watch is paired) has **Mirror to Apple
+Watch** (on by default; the switch appears once the watch app is installed). With it on, the app
+asks once for permission to send notifications, and then, for each message it receives (text, the
+Mac's audio, or the Claude app's streamed voice, by its text):
+
+- sends it to the watch app, live while the watch app is open and in reach, else queued (watchOS
+  hands queued ones over in order, as soon as the app is in front, or when it wakes the app in the
+  background);
+- while the phone's app isn't on screen (so a phone in hand isn't nagged), posts a notification,
+  "Miss Sakamoto" with the text (without voice markers, cut at 1,000 characters), and a **Speak**
+  action. iOS shows a notification on the watch only while the phone is **locked or its screen is
+  off** and the watch is on your wrist and unlocked; with the phone's app open on its stand and Keep
+  Screen On, no notification is posted, so lock the phone (or let it lock) before you walk off.
+
+**On the watch**, the app shows the last ten messages, newest first, each with Miss Sakamoto's 👩🏻‍🔬
+avatar, and a big **Speak** button that reads the selected one (the newest, or the one you tap);
+while it speaks it's a Stop button. **Auto-speak while open** (on by default) reads each new
+message as it arrives while the app is in front, on screen or with the wrist down (a message that
+waited in the queue for more than two minutes is only listed). A notification on the watch shows
+the whole message, and its **Speak** opens the app and reads it. Japanese script and `〔ja〕` text
+are read in a Japanese voice and the rest in an English one; text in neither follows the phone's
+"Default Voice for Other Text", at the phone's rate. The watch has its own (fewer) voices: when it
+has no Japanese voice, its default voice reads Japanese too.
+
+The Claude app's own voice isn't streamed to the watch; the watch reads the text instead (below).
+
+### What watchOS allows
+
+The design follows from these, checked in the watchOS 27.0 SDK headers and Apple's documentation;
+those marked *untested* haven't been tried on a watch yet.
+
+- **No listener on the watch.** watchOS lets an app use low-level networking (Network framework,
+  `NWListener`, Bonjour, stream and WebSocket tasks) only while it streams long-form audio, during
+  a CallKit call, or for a DeviceDiscoveryUI connection from its tvOS app; otherwise a connection
+  waits with `ENETDOWN`, and BSD sockets never work. The simulator always allows it, so it proves
+  nothing (TN3135). Long-form audio on watchOS needs a Bluetooth audio route (Playing Background
+  Audio). So the Mac can't reach the watch, and the phone relays.
+- **Audio.** Background playback needs the long-form route-sharing policy and a Bluetooth route
+  (headphones or a speaker), activated with `activate(options:completionHandler:)`, which shows a
+  route picker if needed (`AVAudioSession` headers; Playing Background Audio); it never uses the
+  watch's own speaker. In front, Apple's guidelines say an app can play short clips; the watch app
+  uses an ordinary playback session (spoken audio, the default policy) and `AVSpeechSynthesizer`,
+  which should play on the watch's speaker, or on Bluetooth audio when that's connected. Apple
+  doesn't document the speaker case, and developers have reported silence without headphones on
+  some watches (watchOS 6), so this is *untested* until it's tried on the watch.
+- **WatchConnectivity.** `sendMessage` works only while the counterpart is reachable, which for the
+  phone means the watch app is running in front (or in the background at high priority, such as a
+  workout), and from the phone it never wakes the watch app (it does wake the phone's app from the
+  watch). `transferUserInfo` is queued, delivered in order, and continues after the sender exits;
+  the frontmost watch app gets it at once, otherwise watchOS delivers it when it wakes the app, on
+  a limited background budget. Apple gives no latency figures; Apple calls WatchConnectivity an
+  opportunistic channel. The simulator doesn't support `transferUserInfo` (WCSession docs).
+- **Notifications.** A notification goes to the phone if the phone is unlocked with its screen on;
+  otherwise to the watch if it's on the wrist and unlocked; otherwise to the phone (Taking
+  Advantage of Notification Forwarding). A watch app can give a notification category its own
+  long-look interface (`WKNotificationScene`, watchOS 7) and shows the category's actions; an
+  action with the foreground option opens the watch app, whose notification delegate gets the
+  response. While the watch app is on screen or frontmost, its delegate gets the notification
+  instead of an alert (`userNotificationCenter(_:willPresent:)`).
+- **Staying in front.** After the wrist goes down, the app stays frontmost (it can still receive
+  messages and notifications) for two minutes by default, then goes to the background. Only the
+  wearer can change that, in Settings → General → Wake Screen → Return to Clock, for all apps or
+  one (Taking Advantage of Frontmost App State); since watchOS 7 an app can't extend it itself.
+  Whether speech plays while frontmost with the wrist down is *untested*. Extended runtime sessions
+  come in four kinds, each for its own use (self care, frontmost for 10 minutes; mindfulness,
+  frontmost for an hour; physical therapy, in the background for an hour; smart alarm, scheduled,
+  30 minutes), and Apple says to pick one by the app's intended use, not by what it provides
+  (Using Extended Runtime Sessions). None fits reading messages, so the app uses none, and no
+  workout session either.
+- **Why not stream Claude's voice to the watch.** The watch can't take the Mac's stream (no
+  listener), and the phone could relay it only over WatchConnectivity's live messages (about 48
+  KB/s of PCM), which work only while the watch app is open and in reach, on a channel Apple
+  describes as opportunistic, to a speaker whose use isn't documented. That's not worth building
+  until the text-and-voices version is proven on a watch.
+
+Sources: [TN3135: Low-level networking on watchOS](https://developer.apple.com/documentation/technotes/tn3135-low-level-networking-on-watchos);
+[Playing Background Audio](https://developer.apple.com/documentation/watchkit/playing-background-audio);
+[AVAudioSession.RouteSharingPolicy.longFormAudio](https://developer.apple.com/documentation/avfaudio/avaudiosession/routesharingpolicy-swift.enum/longformaudio);
+[Playing audio (Human Interface Guidelines)](https://developer.apple.com/design/human-interface-guidelines/playing-audio);
+[WCSession](https://developer.apple.com/documentation/watchconnectivity/wcsession),
+[isReachable](https://developer.apple.com/documentation/watchconnectivity/wcsession/isreachable),
+[sendMessage(_:replyHandler:errorHandler:)](https://developer.apple.com/documentation/watchconnectivity/wcsession/sendmessage(_:replyhandler:errorhandler:)),
+[transferUserInfo(_:)](https://developer.apple.com/documentation/watchconnectivity/wcsession/transferuserinfo(_:));
+[Taking advantage of notification forwarding](https://developer.apple.com/documentation/watchos-apps/taking-advantage-of-notification-forwarding);
+[Enabling and receiving notifications](https://developer.apple.com/documentation/watchos-apps/enabling-and-receiving-notifications);
+[WKNotificationScene](https://developer.apple.com/documentation/swiftui/wknotificationscene);
+[Taking advantage of frontmost app state](https://developer.apple.com/documentation/watchkit/taking-advantage-of-frontmost-app-state);
+[Using extended runtime sessions](https://developer.apple.com/documentation/watchkit/using-extended-runtime-sessions);
+the reports of silence on the watch's speaker:
+[Apple Developer Forums 653732](https://developer.apple.com/forums/thread/653732),
+[737250](https://developer.apple.com/forums/thread/737250).
+
+### Install it on the watch
+
+The watch app is built into the iPhone app (in its `Watch` folder), so `scripts/build.sh install`
+installs both on the phone. Then:
+
+1. Turn on Developer Mode on the watch (Settings → Privacy & Security → Developer Mode), which a
+   development-signed app needs; it appears once the watch has been seen by Xcode through its
+   iPhone (Xcode's Devices and Simulators window).
+2. In the Watch app on the iPhone, under Available Apps, install Sakamoto Voice (or let Automatic
+   App Install do it). Should the watch refuse it, the watch isn't in your team's profile yet:
+   open `ios/SakamotoVoice.xcodeproj` once, pick the SakamotoVoiceWatch scheme and the watch, and
+   Run, which registers it.
+3. Open Sakamoto Voice on the phone: Settings → Apple Watch → Mirror to Apple Watch is on; allow
+   notifications when asked.
+4. Optionally, on the watch, Settings → General → Wake Screen → Return to Clock → Sakamoto Voice:
+   a longer time keeps the app in front, and Auto-speak working, after the wrist goes down.
+
+Before walking off, lock the phone, so its notifications go to the watch.
 
 ## Experimental: the Claude app's own voice
 
@@ -380,7 +508,9 @@ then needs the System Audio Recording permission itself.
 
 Everything stays on your Mac and your local network. There is no telemetry, no account, and no
 server: the plugin speaks with macOS `say`, finds the phone with Bonjour, and sends responses
-straight to it; the phone app only listens on the local network and never connects out. The app
+straight to it; the phone app only listens on the local network and never connects out, except
+that it passes messages to its own watch app, through Apple's WatchConnectivity and local
+notifications, between the paired phone and watch (the watch keeps the last ten). The app
 modes talk only to the Claude app on `127.0.0.1`. Files are kept in
 `~/.config/sakamoto-voice/`: the settings, and `speak.log`, which records what happened (errors,
 the phone's address, and, in the app modes, the first few letters of each response it matched).
@@ -399,7 +529,8 @@ The tests, all headless (nothing is launched and no audio is captured):
 
     cd ios
     scripts/build.sh test       # SakamotoVoiceKit's tests on an iOS simulator
-    scripts/build.sh sim        # a simulator build (no team needed)
+    scripts/build.sh sim        # a simulator build, the watch app inside it (no team needed)
+    scripts/build.sh watch      # the watch app alone: for its simulator, and unsigned for a watch
     scripts/build.sh device     # a signed build for any iPhone, to check signing
 
 `scripts/build.sh` uses the Xcode that `xcode-select` picks (or `$DEVELOPER_DIR`), and the
@@ -419,10 +550,13 @@ with the next response. Changes to `hooks.json` still need the update and the re
 `ios/project.yml` is the source of the Xcode project (generated and git-ignored); signing is in
 `ios/Config/Signing.xcconfig`, with your team in the git-ignored `Signing.local.xcconfig` beside it.
 The app's version (`MARKETING_VERSION` in `project.yml`) follows the plugin's, except for changes on
-one side only: both are 1.0 (the phone chooses Claude's voice or the text, and the Mac follows), the
-app as build 8. The app's pure parts (protocol, pairing, language runs, schedule, keep-alive
-sound, the Claude's Voice choice, and streams' framing and jitter buffer) and its receiver are in the `SakamotoVoiceKit`
-package, which `app-voice-tap` uses too, and which also has `voice-listen`, a stand-in phone on the
+one side only: the plugin is 1.0 (the phone chooses Claude's voice or the text, and the Mac
+follows), and the app 1.1, build 9 (the Apple Watch app, the phone's side alone); the watch app
+always has the iPhone app's version and build. The apps' pure parts (protocol, pairing, language
+runs and voice markers, schedule, keep-alive sound, the Claude's Voice choice, streams' framing
+and jitter buffer, and the messages mirrored to the watch) and the phone's receiver are in the
+`SakamotoVoiceKit` package (for iOS, watchOS, and macOS), which `app-voice-tap` uses too, and which
+also has `voice-listen`, a stand-in phone on the
 Mac that prints what arrives (and, with `--save DIR`, keeps streams as WAV files):
 
     cd ios/SakamotoVoiceKit && swift run voice-listen 123456

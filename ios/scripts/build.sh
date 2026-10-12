@@ -2,11 +2,14 @@
 # Builds Sakamoto Voice headlessly. Products go to ios/build/ (git-ignored).
 #
 #     scripts/build.sh test              the unit tests on an iOS simulator (no app is launched)
-#     scripts/build.sh sim               a simulator build
+#     scripts/build.sh sim               a simulator build (the watch app inside it, for its simulator)
+#     scripts/build.sh watch             the watch app alone, for the watchOS simulator and, unsigned,
+#                                        for a watch (compiles; no team or watch simulator needed)
 #     scripts/build.sh device            a signed build for any iPhone (checks signing)
 #     scripts/build.sh install [phone]   build for the phone and install it (USB or Wi-Fi paired);
 #                                        [phone] is its name or identifier, as
-#                                        `xcrun devicectl list devices` shows; the only one if omitted
+#                                        `xcrun devicectl list devices` shows; the only one if omitted.
+#                                        The watch app comes inside it, for a paired watch
 #     scripts/build.sh clean             removes ios/build/
 #
 # device and install sign with your Apple Development team, from ios/Config/Signing.local.xcconfig
@@ -48,6 +51,12 @@ case "${1:-}" in
     generate
     xcodebuild "${common[@]}" -destination 'generic/platform=iOS Simulator' build
     ;;
+  watch)
+    generate
+    watch=(-project SakamotoVoice.xcodeproj -scheme SakamotoVoiceWatch -derivedDataPath "$DERIVED" -jobs 6)
+    xcodebuild "${watch[@]}" -destination "generic/platform=watchOS Simulator" build
+    xcodebuild "${watch[@]}" -destination "generic/platform=watchOS" CODE_SIGNING_ALLOWED=NO build
+    ;;
   device)
     team=$(team)
     generate
@@ -87,7 +96,7 @@ print(phones[0]["hardwareProperties"]["udid"])' "$json" "${2:-}")
     rm -rf build
     ;;
   *)
-    sed -n '2,14p' "$0"
+    sed -n '2,17p' "$0"
     exit 2
     ;;
 esac

@@ -15,6 +15,7 @@ struct SettingsView: View {
                 pairing
                 voices(settings)
                 claudesVoice(settings)
+                appleWatch(settings)
                 stayingAwake(settings)
                 Section {
                     Toggle("Keep Screen On", isOn: $settings.keepScreenOn)
@@ -33,6 +34,7 @@ struct SettingsView: View {
             .onChange(of: settings.keepAlivePolicy) { model.evaluateKeepAlive() }
             .onChange(of: settings.keepScreenOn) { model.evaluateKeepAlive() }
             .onChange(of: settings.voicePolicy) { model.voicePolicyChanged() }
+            .onChange(of: settings.mirrorToWatch) { model.mirrorChanged() }
         }
     }
 
@@ -144,6 +146,42 @@ struct SettingsView: View {
         return text
     }
 
+    /// Only with a paired watch; the switch only once the watch app is installed.
+    @ViewBuilder
+    private func appleWatch(_ settings: Settings) -> some View {
+        @Bindable var settings = settings
+        if model.watch.isPaired {
+            Section {
+                if model.watch.isWatchAppInstalled {
+                    Toggle("Mirror to Apple Watch", isOn: $settings.mirrorToWatch)
+                } else {
+                    Text("Install Sakamoto Voice on the watch: in the Watch app on this iPhone, under Available Apps.")
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Apple Watch")
+            } footer: {
+                Text(watchFooter)
+            }
+        }
+    }
+
+    private var watchFooter: String {
+        guard model.watch.isWatchAppInstalled else {
+            return "Then each message can also appear on the watch, which can read it aloud."
+        }
+        var text = """
+            Each message also goes to the watch app, which lists it and can read it aloud. While this \
+            app isn't on screen, a notification shows it on the watch too, with Speak. iOS sends a \
+            notification to the watch only while the phone is locked or its screen is off and the \
+            watch is on your wrist and unlocked.
+            """
+        if settings.mirrorToWatch && model.watch.notificationsAllowed == false {
+            text += " Notifications are off for Sakamoto Voice: turn them on in Settings → Notifications."
+        }
+        return text
+    }
+
     private func stayingAwake(_ settings: Settings) -> some View {
         @Bindable var settings = settings
         return Section {
@@ -179,7 +217,7 @@ struct SettingsView: View {
 
     private var about: some View {
         Section("About") {
-            LabeledContent("Version", value: AppModel.version)
+            LabeledContent("Version", value: "\(AppModel.version) (\(AppModel.build))")
             LabeledContent("Listening") {
                 switch model.serverState {
                 case .listening(let port): Text("Port \(String(port))")

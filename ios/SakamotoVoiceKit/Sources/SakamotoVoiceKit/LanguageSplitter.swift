@@ -24,8 +24,19 @@ public enum LanguageSplitter {
 
     private static let ignorable = CharacterSet(charactersIn: " \n\t.,;:")
 
+    /// A stretch of text and its voice, before tidying.
+    struct Span {
+        var lang: String
+        var text: String
+    }
+
     public static func runs(in text: String, other: String = "en") -> [LangRun] {
-        var raw: [(String, String.UnicodeScalarView)] = []
+        tidy(scriptSpans(text[...], other: other), absorb: false)
+    }
+
+    /// Raw spans by script: Japanese script (and what continues it) is "ja"; the rest is `other`.
+    static func scriptSpans(_ text: Substring, other: String) -> [Span] {
+        var spans: [Span] = []
         var current = String.UnicodeScalarView()
         var inJapanese = false
         for scalar in text.unicodeScalars {
@@ -34,24 +45,38 @@ public enum LanguageSplitter {
                     current.append(scalar)
                     continue
                 }
-                raw.append(("ja", current))
+                spans.append(Span(lang: "ja", text: String(current)))
                 current = String.UnicodeScalarView()
                 inJapanese = false
             }
             if isJapaneseScript(scalar) {
-                if !current.isEmpty { raw.append((other, current)) }
+                if !current.isEmpty { spans.append(Span(lang: other, text: String(current))) }
                 current = String.UnicodeScalarView([scalar])
                 inJapanese = true
             } else {
                 current.append(scalar)
             }
         }
-        if !current.isEmpty { raw.append((inJapanese ? "ja" : other, current)) }
+        if !current.isEmpty { spans.append(Span(lang: inJapanese ? "ja" : other, text: String(current))) }
+        return spans
+    }
 
-        return raw.compactMap { lang, scalars in
-            let text = String(scalars)
-            guard !text.trimmingCharacters(in: ignorable).isEmpty else { return nil }
-            return LangRun(lang: lang, text: text.trimmingCharacters(in: .whitespacesAndNewlines))
+    /// Joins neighboring spans in the same voice, then trims them and drops the ones with nothing
+    /// but spaces and punctuation (`tidy` in speak.py). With `absorb`, such a span joins the one
+    /// before it instead, so the spans on either side of it can join too.
+    static func tidy(_ spans: [Span], absorb: Bool) -> [LangRun] {
+        var merged: [Span] = []
+        for span in spans {
+            if let last = merged.last,
+               last.lang == span.lang || (absorb && span.text.trimmingCharacters(in: ignorable).isEmpty) {
+                merged[merged.count - 1].text += span.text
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged.compactMap { span in
+            guard !span.text.trimmingCharacters(in: ignorable).isEmpty else { return nil }
+            return LangRun(lang: span.lang, text: span.text.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
 }

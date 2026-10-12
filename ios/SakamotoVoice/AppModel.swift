@@ -22,10 +22,12 @@ struct ShownMessage: Identifiable, Equatable {
     let source: Source
 }
 
-/// Ties the receiver, the speaker, the keep-alive, the network path, and the settings together.
+/// Ties the receiver, the speaker, the keep-alive, the network path, the Apple Watch link, and the
+/// settings together.
 @MainActor @Observable
 final class AppModel {
     static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+    static let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
     static let historyLength = 5
 
     let settings = Settings()
@@ -33,6 +35,8 @@ final class AppModel {
     let keepAlive = KeepAlive()
     /// Claude's Voice and the network path, for the receiver's answers (read on its queue).
     let voicePreference = VoicePreference()
+    /// The Apple Watch app: each message is mirrored to it.
+    let watch = WatchLink()
 
     /// Newest first.
     private(set) var messages: [ShownMessage] = []
@@ -74,6 +78,8 @@ final class AppModel {
                 MainActor.assumeIsolated { self?.serverState = state }
             }
         }
+        watch.onSpeak = { [weak self] message in self?.speakMirrored(message) }
+        watch.onStateChange = { [weak self] in self?.mirrorChanged() }
         server.start()
         watchThePath()
         evaluateKeepAlive()
@@ -103,7 +109,7 @@ final class AppModel {
             guard let stream, stream.id == id else { return }
             if !streamShown {
                 streamShown = true
-                show(stream.text, source: .appStream)
+                show(stream.text, source: .appStream, runs: nil)
             }
             speaker.stream.feed(audio)
             return
@@ -112,22 +118,25 @@ final class AppModel {
             stream = nil
             speaker.stream.end()
             return
-        case .text(let text, _):
+        case .text(let text, let runs):
             stream = nil
-            show(text, source: .text)
+            show(text, source: .text, runs: runs)
         case .audio(_, _, let text):
             stream = nil
-            show(text, source: .macAudio)
+            show(text, source: .macAudio, runs: nil)
         }
         last = incoming
         perform(incoming)
     }
 
-    private func show(_ text: String, source: ShownMessage.Source) {
-        messages.insert(ShownMessage(date: Date(), text: text, source: source), at: 0)
+    /// Shows a message, and mirrors it to the watch; `runs` are the Mac's, when it sent them.
+    private func show(_ text: String, source: ShownMessage.Source, runs: [LangRun]?) {
+        let message = ShownMessage(date: Date(), text: text, source: source)
+        messages.insert(message, at: 0)
         if messages.count > Self.historyLength {
             messages.removeLast(messages.count - Self.historyLength)
         }
+        mirror(message, runs: runs)
     }
 
     private func perform(_ incoming: Incoming) {
@@ -162,6 +171,42 @@ final class AppModel {
         let text = "Good heavens, Miss Sakamoto, you can talk! そうやで。"
         stream = nil
         perform(.text(text, runs: LanguageSplitter.runs(in: text, other: LangRun.phoneDefault)))
+    }
+
+    // MARK: - The Apple Watch
+
+    /// Mirroring is on and the watch app is installed.
+    var mirrorsToWatch: Bool { settings.mirrorToWatch && watch.isWatchAppInstalled }
+
+    /// To the watch app, and, while this app isn't on screen (so a phone in hand isn't nagged),
+    /// as a notification for the watch.
+    private func mirror(_ shown: ShownMessage, runs: [LangRun]?) {
+        guard mirrorsToWatch, !shown.text.isEmpty else { return }
+        let source: MirroredMessage.Source = switch shown.source {
+        case .text: .text
+        case .macAudio: .macAudio
+        case .appStream: .appStream
+        }
+        let message = MirroredMessage(
+            id: shown.id.uuidString, date: shown.date, text: shown.text,
+            runs: runs ?? LanguageSplitter.runs(in: shown.text, other: LangRun.phoneDefault), source: source,
+            defaultLang: settings.defaultVoice.rawValue, rate: settings.rate)
+        watch.send(message)
+        if !isActive { watch.notify(message) }
+    }
+
+    /// The setting or the watch changed: the first time mirroring is on, ask to notify.
+    func mirrorChanged() {
+        guard mirrorsToWatch, isActive else { return }
+        Task { await watch.requestNotificationsIfNeeded() }
+    }
+
+    /// A notification's Speak action, on this phone.
+    private func speakMirrored(_ message: MirroredMessage) {
+        let incoming = Incoming.text(message.shownText, runs: message.runs)
+        last = incoming
+        stream = nil
+        perform(incoming)
     }
 
     // MARK: - Claude's voice or the text
@@ -219,6 +264,8 @@ final class AppModel {
             if wasSuspendable { server.restart() }
             wasSuspendable = false
             evaluateKeepAlive()
+            watch.refreshNotificationStatus()
+            mirrorChanged()
         case .background:
             isActive = false
             wasSuspendable = !keepAlive.isRunning

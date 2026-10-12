@@ -134,6 +134,11 @@ private struct WaitingView: View {
                     .textSelection(.enabled)
                 Text("On the Mac, run:\nsakamoto pair \(code)")
                     .font(.callout.monospaced())
+                // Which version is installed, at a glance.
+                Text("Sakamoto Voice \(AppModel.version) (\(AppModel.build))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 8)
             }
         }
         .frame(maxHeight: .infinity)

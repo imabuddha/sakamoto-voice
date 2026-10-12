@@ -36,6 +36,9 @@ final class Settings {
     /// Claude's Voice: take the Claude app's voice streamed from the Mac, or have the Mac send only
     /// the text (always, or on cellular data, the default).
     var voicePolicy: VoicePolicy { didSet { defaults.set(voicePolicy.rawValue, forKey: Key.voicePolicy) } }
+    /// Mirror each message to the Apple Watch app (and notify the watch while the app isn't on
+    /// screen); it applies only while the watch app is installed.
+    var mirrorToWatch: Bool { didSet { defaults.set(mirrorToWatch, forKey: Key.mirrorToWatch) } }
 
     enum Key {
         static let pairingCode = "pairingCode"
@@ -49,6 +52,7 @@ final class Settings {
         static let scheduleEnd = "scheduleEnd"
         static let keepScreenOn = "keepScreenOn"
         static let voicePolicy = "voicePolicy"
+        static let mirrorToWatch = "mirrorToWatch"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -62,6 +66,7 @@ final class Settings {
             Key.scheduleEnd: 23 * 60,
             Key.keepScreenOn: true,
             Key.voicePolicy: VoicePolicy.default.rawValue,
+            Key.mirrorToWatch: true,
         ])
         var code = defaults.string(forKey: Key.pairingCode) ?? ""
         if !PairingCode.isValid(code) {
@@ -79,6 +84,7 @@ final class Settings {
         scheduleEnd = defaults.integer(forKey: Key.scheduleEnd)
         keepScreenOn = defaults.bool(forKey: Key.keepScreenOn)
         voicePolicy = VoicePolicy(rawValue: defaults.string(forKey: Key.voicePolicy) ?? "") ?? .default
+        mirrorToWatch = defaults.bool(forKey: Key.mirrorToWatch)
     }
 
     var schedule: DailySchedule {
