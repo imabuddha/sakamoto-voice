@@ -122,6 +122,7 @@ Then:
 
     sakamoto test        # a sample line
     sakamoto stop        # silence the current response (on the phone too)
+    sakamoto hush        # the same, logged as a barge-in (Sakamoto Eyes runs it when you talk over her)
     sakamoto off         # mute until "sakamoto on"
     sakamoto status      # the settings
     sakamoto             # all the commands
@@ -139,6 +140,11 @@ speaker, so the hook returns at once and never holds up Claude Code. The speaker
 Mac, sends it to the phone, or both. A new response interrupts one still being spoken, on the Mac
 and on the phone, and sending a new message silences it (a UserPromptSubmit hook runs
 `speak.py stop`). Subagents don't speak (they end with SubagentStop, not Stop).
+
+While the speaker runs, `~/.config/sakamoto-voice/speaker.pid` names it. Sakamoto Eyes (the
+listening companion) watches that file to know when her voice is on, and runs `speak.py hush`
+when you start talking over her (barge-in): it silences her as `stop` does, without counting as a
+prompt, and logs a "barge-in" line in `speak.log`.
 
 ### Voices and voice markers
 
@@ -469,6 +475,13 @@ This mode exists because no supported route does; we've asked Anthropic for one.
 ### `output app`: on the Mac
 
     sakamoto output app          # the app's voice when its debugger is on, else the Mac's
+
+Once Read aloud is pressed the speaker exits, so `speaker.pid` is gone while the app still reads.
+For Sakamoto Eyes, `~/.config/sakamoto-voice/app-reading` then says the app is reading:
+`{"started": …, "ends": …, "text": …}` (Unix times; the end estimated from the text at about 165
+words a minute, or 6.5 Japanese characters a second, plus 1.5 s). The next response, `stop`, and
+`hush` remove it; they can't stop the app's own reading, which Sakamoto Eyes' relay stops through
+the same debugger.
 
 ### `output app-phone`: streamed to the phone
 

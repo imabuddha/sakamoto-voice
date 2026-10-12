@@ -7,8 +7,10 @@ PATH as README.md describes):
   speak.py                 as a Stop hook: reads the hook's JSON on stdin, finds the response's final
                            text, and hands it to a detached speaker so the hook returns at once.
   speak.py --speak FILE    the detached speaker (internal): reads FILE, speaks it, deletes it.
-  speak.py on|off|stop|status|test ["text"]
-                           the switch: on and off persist; stop silences the current response.
+  speak.py on|off|stop|hush|status|test ["text"]
+                           the switch: on and off persist; stop silences the current response;
+                           hush does the same for a barge-in (Sakamoto Eyes runs it when you talk
+                           over her), logged as one.
   speak.py pair CODE       pairs with the phone: stores its 6-digit code and finds it on the network.
   speak.py output mac|phone|both|app|app-both|app-phone
                            where responses are spoken.
@@ -68,6 +70,9 @@ Markers are never spoken or shown; unknown ones, such as 〔xx〕, are dropped. 
 too, whatever its setting.
 A new response interrupts the one still being spoken, on the Mac and on the phone. Sending to the
 phone happens in the detached speaker; its failures are silent but logged to speak.log here.
+While the Claude app's own Read aloud reads a response, ~/.config/sakamoto-voice/app-reading says
+so (when it started, about when it ends, and the text), for Sakamoto Eyes, which watches
+speaker.pid otherwise; the next response, stop, and hush remove it.
 """
 import base64, json, os, pty, re, select, shutil, signal, socket, subprocess, sys, tempfile, threading
 import time, wave
@@ -81,6 +86,10 @@ PIDFILE = os.path.join(HOME, 'speaker.pid')
 # response the app's voice is skipped (see speak()).
 PROMPTED = os.path.join(HOME, 'prompted')
 RESPONDED = os.path.join(HOME, 'responded')
+# While the Claude app's Read aloud reads a response (app_read clicked): {"started", "ends" (Unix
+# times; the end estimated from the text), "text"}. Its speaker has exited by then, so this is how
+# Sakamoto Eyes' hub knows her voice is on (for its echo guard and barge-in).
+APP_READING = os.path.join(HOME, 'app-reading')
 LOG = os.path.join(HOME, 'speak.log')
 LOG_MAX = 64 * 1024          # then speak.log becomes speak.log.1, replacing the one before
 DEFAULTS = {'enabled': True, 'voice_en': '', 'voice_ja': 'Kyoko', 'default_lang': 'auto', 'rate': 0,
@@ -588,16 +597,18 @@ def stop_phone(cfg):
 # ---- Speaking -------------------------------------------------------------------------------
 
 def stop_speaker():
+    """Silences the Mac's speaker, and drops the note that the Claude app is reading."""
     try:
         with open(PIDFILE) as f:
             pid = int(f.read().strip())
         os.killpg(pid, signal.SIGTERM)
     except (OSError, ValueError):
         pass
-    try:
-        os.remove(PIDFILE)
-    except OSError:
-        pass
+    for path in (PIDFILE, APP_READING):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 NOTICE_TAGS = ('<task-notification', '<system-reminder', '<local-command', '<bash-')
@@ -655,6 +666,33 @@ def read_key(text, length=40):
     return ''.join(c for c in text.lower() if c.isalnum())[:length]
 
 
+READ_WORDS_PER_SECOND = 2.75    # the Claude app's English voice, about 165 words a minute
+READ_JA_PER_SECOND = 6.5        # and its Japanese, in characters
+READ_LEAD = 1.5                 # seconds from the click to its first word
+
+
+def reading_seconds(text):
+    """About how long the Claude app takes to read this response aloud: Japanese characters at
+    READ_JA_PER_SECOND, other words at READ_WORDS_PER_SECOND, after READ_LEAD."""
+    spans = script_spans(strip_markers(speakable(text)))
+    ja = sum(len(re.sub(r'[\s、。！？]', '', t)) for lang, t in spans if lang == 'ja')
+    words = sum(len(re.findall(r'[^\W_]+', t)) for lang, t in spans if lang != 'ja')
+    return READ_LEAD + words / READ_WORDS_PER_SECOND + ja / READ_JA_PER_SECOND
+
+
+def note_app_reading(text, now=None):
+    """Writes APP_READING: the app reads `text` from now until about reading_seconds() later."""
+    now = time.time() if now is None else now
+    try:
+        os.makedirs(HOME, exist_ok=True)
+        with open(APP_READING + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump({'started': round(now, 3), 'ends': round(now + reading_seconds(text), 3),
+                       'text': strip_markers(text)}, f, ensure_ascii=False)
+        os.replace(APP_READING + '.tmp', APP_READING)
+    except OSError as e:
+        log(f'app-reading: {e}')
+
+
 def app_read(text, delay=0.5):
     """Presses Read aloud on this response (the raw text) in the Claude app; True when it clicked.
     app-read.mjs waits for the page to draw the response's button, so the delay is only a head start."""
@@ -672,6 +710,8 @@ def app_read(text, delay=0.5):
         log(f'app: {e}')
         return False
     log(f'app: {(result.stdout or result.stderr).strip()[:200]} ({read_key(text, 24)})')
+    if result.returncode == 0:
+        note_app_reading(text)
     return result.returncode == 0
 
 
@@ -1128,6 +1168,12 @@ def main():
             touch(PROMPTED)
             stop_speaker()
             stop_phone(cfg)
+        elif cmd == 'hush':
+            # Barge-in: Sakamoto Eyes' hub heard you talk over her. Silences her like stop (the
+            # Mac's speaker, the phone, and the app-reading note), without counting as a prompt.
+            stop_speaker()
+            stop_phone(cfg)
+            log('barge-in')
         elif cmd == 'status':
             print(json.dumps(cfg, indent=2, ensure_ascii=False))
         elif cmd == 'test':

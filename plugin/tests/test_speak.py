@@ -39,7 +39,8 @@ class Isolated(unittest.TestCase):
         patches = {'HOME': home, 'CONFIG': os.path.join(home, 'config.json'),
                    'PIDFILE': os.path.join(home, 'speaker.pid'), 'LOG': os.path.join(home, 'speak.log'),
                    'PROMPTED': os.path.join(home, 'prompted'), 'RESPONDED': os.path.join(home, 'responded'),
-                   'RECORDINGS': os.path.join(home, 'recordings')}
+                   'RECORDINGS': os.path.join(home, 'recordings'),
+                   'APP_READING': os.path.join(home, 'app-reading')}
         for name, value in patches.items():
             p = mock.patch.object(speak, name, value)
             p.start()
@@ -502,6 +503,69 @@ class CommandTests(Isolated):
         with mock.patch.object(speak, 'exchange') as exchange, mock.patch.object(speak, 'stop_speaker'):
             self.run_main('stop')
         exchange.assert_not_called()
+
+
+class AppReadingAndHushTests(Isolated):
+    """The app-reading note Sakamoto Eyes watches while the Claude app reads, and barge-in's hush."""
+
+    run_main = CommandTests.run_main
+
+    def click(self, returncode, text='06:40 The relay is on.'):
+        done = mock.Mock(returncode=returncode, stdout='clicked' if returncode == 0 else 'no Read aloud button',
+                         stderr='')
+        with mock.patch.object(speak.shutil, 'which', return_value='/usr/local/bin/node'), \
+             mock.patch.object(speak.subprocess, 'run', return_value=done):
+            return speak.app_read(text, delay=0)
+
+    def reading(self):
+        with open(speak.APP_READING, encoding='utf-8') as f:
+            return json.load(f)
+
+    def test_a_click_notes_the_reading(self):
+        before = speak.time.time()
+        self.assertTrue(self.click(0, '〔en〕06:40 The relay is on, so every reply gets its own block.'))
+        note = self.reading()
+        self.assertEqual(note['text'], '06:40 The relay is on, so every reply gets its own block.')
+        self.assertGreaterEqual(note['started'], round(before, 3) - 0.001)
+        self.assertGreater(note['ends'], note['started'] + 4)
+
+    def test_no_click_no_note(self):
+        self.assertFalse(self.click(1))
+        self.assertFalse(os.path.exists(speak.APP_READING))
+
+    def test_reading_seconds(self):
+        twelve = 'Hello there, this is a test of twelve words in one sentence.'
+        self.assertAlmostEqual(speak.reading_seconds(twelve), speak.READ_LEAD + 12 / speak.READ_WORDS_PER_SECOND)
+        self.assertAlmostEqual(speak.reading_seconds('はい、今日は晴れですよ。'),
+                               speak.READ_LEAD + 10 / speak.READ_JA_PER_SECOND)
+        # Code isn't read, nor are markers.
+        self.assertAlmostEqual(speak.reading_seconds('〔en〕Done. ```x = 1```'),
+                               speak.READ_LEAD + 3 / speak.READ_WORDS_PER_SECOND)
+
+    def test_hush_silences_everything_and_logs_a_barge_in(self):
+        self.write_config({'output': 'phone', 'phone': 'iPhone.local:47811', 'phone_token': '123456'})
+        with open(speak.PIDFILE, 'w') as f:
+            f.write('424242')
+        speak.note_app_reading('Reading this.')
+        with mock.patch.object(speak, 'exchange') as exchange, mock.patch.object(speak.os, 'killpg') as killpg:
+            code, _ = self.run_main('hush')
+        self.assertEqual(code, 0)
+        killpg.assert_called_once_with(424242, speak.signal.SIGTERM)
+        self.assertFalse(os.path.exists(speak.PIDFILE))
+        self.assertFalse(os.path.exists(speak.APP_READING))
+        self.assertEqual(json.loads(exchange.call_args[0][1])['kind'], 'stop')
+        self.assertIn('barge-in', self.log_text())
+        self.assertFalse(os.path.exists(speak.PROMPTED))      # not a prompt
+
+    def test_stop_and_the_next_response_remove_the_note(self):
+        speak.note_app_reading('Reading this.')
+        with mock.patch.object(speak, 'hook_notice', return_value=''):
+            self.run_main('stop')
+        self.assertFalse(os.path.exists(speak.APP_READING))
+        speak.note_app_reading('Reading this.')
+        with mock.patch.object(speak.subprocess, 'Popen'):
+            speak.launch('The next response.')
+        self.assertFalse(os.path.exists(speak.APP_READING))
 
 
 class SpeakerTests(Isolated):
