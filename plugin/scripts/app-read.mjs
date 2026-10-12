@@ -11,7 +11,7 @@
 const port = process.argv[2] || '9229';
 const key = process.argv[3] || '';
 const WAIT_MS = 8000;
-const EARLIER_TEXT = 120;   // letters and digits allowed before the reply (labels, not a message)
+const EARLIER_TEXT = 12;    // letters and digits allowed before the reply (a label at most, not a message)
 
 // Runs in the page: finds the button (newest first, among the last few), or says why not.
 const inPage = `(async () => {
@@ -46,7 +46,7 @@ const inPage = `(async () => {
       if (at > EARLIER_TEXT) return 'earlier text first (' + at + ' chars before this reply)';
       button.dataset.sakamotoRead = '1';
       button.click();
-      return 'clicked';
+      return 'clicked' + (key ? ' (at ' + at + ' of ' + norm(messageOf(button).innerText || '').length + ')' : '');
     }
     if (Date.now() > end) return why;
     await new Promise((r) => setTimeout(r, 500));
@@ -63,7 +63,7 @@ const expression = `(async () => {
   return await page.executeJavaScript(${JSON.stringify(inPage)});
 })()`;
 
-const done = (message) => { console.log(message); process.exit(message === 'clicked' ? 0 : 1); };
+const done = (message) => { console.log(message); process.exit(String(message).startsWith('clicked') ? 0 : 1); };
 setTimeout(() => done('timeout'), WAIT_MS + 4000);
 try {
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
