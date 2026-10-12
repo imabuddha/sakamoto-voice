@@ -45,6 +45,9 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
             is off, the tool isn't built, or no sound comes, the phone gets the text instead (its
             own voices).
   app_voice_tap  where app-voice-tap is, when it's not in ~/.local/bin or on the PATH.
+  phone_remote  another address for the phone, tried first: e.g. its Tailscale address
+            ("100.x.y.z:47811"), so the phone is reached away from home too; when it fails, the
+            local network as usual.
   dev_path  for working on the plugin: a checkout's plugin/ folder. The installed (cached) copy then
             runs that checkout's speak.py instead, so edits there take effect with the next
             response, without a plugin update or a restart (changes to hooks.json still need both).
@@ -66,12 +69,18 @@ import time, wave
 HOME = os.path.expanduser('~/.config/sakamoto-voice')
 CONFIG = os.path.join(HOME, 'config.json')
 PIDFILE = os.path.join(HOME, 'speaker.pid')
+# When the last prompt (UserPromptSubmit runs `speak.py stop`) and the last response (the Stop hook)
+# came. A response with no prompt since the one before followed a notice, not a message from you,
+# and the Claude app's Read aloud would read it together with the response before; so for such a
+# response the app's voice is skipped (see speak()).
+PROMPTED = os.path.join(HOME, 'prompted')
+RESPONDED = os.path.join(HOME, 'responded')
 LOG = os.path.join(HOME, 'speak.log')
 LOG_MAX = 64 * 1024          # then speak.log becomes speak.log.1, replacing the one before
 DEFAULTS = {'enabled': True, 'voice_en': '', 'voice_ja': 'Kyoko', 'default_lang': 'auto', 'rate': 0,
             'device': '', 'max_chars': 6000,
             'output': 'mac', 'phone_mode': 'text', 'phone_token': '', 'phone': '', 'phone_name': '',
-            'app_voice_tap': '', 'dev_path': ''}
+            'app_voice_tap': '', 'dev_path': '', 'phone_remote': ''}
 OUTPUTS = ('mac', 'phone', 'both', 'app', 'app-both', 'app-phone')
 PHONE_OUTPUTS = ('phone', 'both', 'app-both', 'app-phone')       # the outputs a stop also tells the phone
 PHONE_MODES = ('text', 'audio')
@@ -439,6 +448,12 @@ def reach_phone(attempt):
     if not token:
         log('phone: not paired (speak.py pair CODE)')
         return None
+    remote = cfg.get('phone_remote', '')
+    if remote:                     # e.g. its Tailscale address: works at home and away
+        try:
+            return attempt(remote)
+        except (OSError, ValueError) as e:
+            log(f'phone: {remote} (phone_remote): {e}; trying the local network')
     address = cfg.get('phone', '')
     if address:
         try:
@@ -531,10 +546,11 @@ def deliver_to_phone(cfg, text, runs, mac_runs, voices):
 
 
 def stop_phone(cfg):
-    """Silences the phone, quickly and only at its remembered address."""
-    if cfg.get('output') in PHONE_OUTPUTS and cfg.get('phone') and cfg.get('phone_token'):
+    """Silences the phone, quickly and only at its remembered address (phone_remote first)."""
+    address = cfg.get('phone_remote') or cfg.get('phone')
+    if cfg.get('output') in PHONE_OUTPUTS and address and cfg.get('phone_token'):
         try:
-            exchange(cfg['phone'], message(cfg['phone_token'], 'stop'), timeout=1.5)
+            exchange(address, message(cfg['phone_token'], 'stop'), timeout=1.5)
         except (OSError, ValueError) as e:
             log(f'phone: stop: {e}')
 
@@ -554,13 +570,24 @@ def stop_speaker():
         pass
 
 
-def launch(text):
+def touch(path):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a'):
+            pass
+        os.utime(path)
+    except OSError:
+        pass
+
+
+def launch(text, prompted=True):
     """Hand text to a detached speaker, silencing any earlier one."""
     stop_speaker()
     fd, path = tempfile.mkstemp(prefix='sakamoto-voice-', suffix='.txt')
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(text)
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), '--speak', path],
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), '--speak', path]
+                     + ([] if prompted else ['--unprompted']),
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
 
@@ -871,7 +898,7 @@ def say_command(cfg, voices, lang, play=True):
     return cmd
 
 
-def speak(path):
+def speak(path, prompted=True):
     with open(PIDFILE, 'w') as f:
         f.write(str(os.getpgrp()))
     try:
@@ -887,6 +914,10 @@ def speak(path):
         text = text[:limit].rsplit(' ', 1)[0] + '. The rest is on screen.'
     text, chunks, phone_runs = prepare(speakable(text), cfg)
     output = cfg.get('output') if cfg.get('output') in OUTPUTS else 'mac'
+    if not prompted and output.startswith('app'):
+        # After a notice the app would read the response before this one too: other voices instead.
+        output = {'app': 'mac', 'app-both': 'both', 'app-phone': 'phone'}[output]
+        log(f'app: a response without a new prompt; {output} voices instead')
     if output == 'app':
         output = None if app_read(raw, APP_READ_DELAY) else 'mac'   # the app's own voice, else the Mac's
     elif output == 'app-both':
@@ -962,7 +993,7 @@ def phone_test(text):
 def main():
     args = sys.argv[1:]
     if args[:1] == ['--speak']:
-        speak(args[1])
+        speak(args[1], prompted='--unprompted' not in args)
         return 0
     if args:
         cfg = config()
@@ -975,6 +1006,7 @@ def main():
                 stop_phone(cfg)
             print('Voice', cmd)
         elif cmd == 'stop':
+            touch(PROMPTED)
             stop_speaker()
             stop_phone(cfg)
         elif cmd == 'status':
@@ -1017,8 +1049,11 @@ def main():
     text = event.get('last_assistant_message')
     if not isinstance(text, str) or not text.strip():   # older versions: read the transcript
         text = final_text(event.get('transcript_path', ''))
+    prompted = not os.path.exists(PROMPTED) or not os.path.exists(RESPONDED) or \
+        os.path.getmtime(PROMPTED) >= os.path.getmtime(RESPONDED)
+    touch(RESPONDED)
     if text:
-        launch(text)
+        launch(text, prompted)
     return 0
 
 

@@ -37,7 +37,8 @@ class Isolated(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         home = self.dir.name
         patches = {'HOME': home, 'CONFIG': os.path.join(home, 'config.json'),
-                   'PIDFILE': os.path.join(home, 'speaker.pid'), 'LOG': os.path.join(home, 'speak.log')}
+                   'PIDFILE': os.path.join(home, 'speaker.pid'), 'LOG': os.path.join(home, 'speak.log'),
+                   'PROMPTED': os.path.join(home, 'prompted'), 'RESPONDED': os.path.join(home, 'responded')}
         for name, value in patches.items():
             p = mock.patch.object(speak, name, value)
             p.start()
@@ -505,7 +506,7 @@ class CommandTests(Isolated):
 class SpeakerTests(Isolated):
     """The detached speaker's routing, with `say` and the phone mocked."""
 
-    def run_speaker(self, cfg, text='Hello 囲碁', voices=frozenset(), system='en'):
+    def run_speaker(self, cfg, text='Hello 囲碁', voices=frozenset(), system='en', prompted=True):
         self.write_config(cfg)
         fd, path = tempfile.mkstemp(dir=self.dir.name)
         with os.fdopen(fd, 'w') as f:
@@ -514,7 +515,7 @@ class SpeakerTests(Isolated):
              mock.patch.object(speak.subprocess, 'run') as run, \
              mock.patch.object(speak, 'deliver_to_phone') as deliver, \
              mock.patch.object(speak, 'system_lang', return_value=system):
-            speak.speak(path)
+            speak.speak(path, prompted=prompted)
         self.assertFalse(os.path.exists(path))
         return run, deliver
 
@@ -1126,3 +1127,41 @@ class ReadKeyAndDevHandoff(unittest.TestCase):
             with mock.patch.object(speak, 'config', return_value={'dev_path': os.path.dirname(os.path.dirname(speak.__file__))}):
                 speak.dev_handoff()          # this very copy
         execv.assert_not_called()
+
+
+class PromptedAndRemote(SpeakerTests):
+    """A response after a notice skips the app's voice; phone_remote is tried first."""
+
+    def test_unprompted_app_outputs_use_other_voices(self):
+        for output, expect_run, expect_deliver in (('app', 2, 0), ('app-both', 2, 1)):
+            with mock.patch.object(speak, 'app_read') as click, \
+                 mock.patch.object(speak, 'app_phone') as app_phone:
+                run, deliver = self.run_speaker({'output': output, 'default_lang': 'en'}, prompted=False)
+            click.assert_not_called()
+            app_phone.assert_not_called()
+            self.assertEqual((run.call_count, deliver.call_count), (expect_run, expect_deliver))
+
+    def test_prompted_marks(self):
+        self.assertTrue(os.path.basename(speak.PROMPTED) and os.path.basename(speak.RESPONDED))
+
+    def test_remote_first(self):
+        self.write_config({'phone_token': '123456', 'phone': 'Example-iPhone.local:47811',
+                           'phone_remote': '100.64.0.9:47811'})
+        tried = []
+        def attempt(address):
+            tried.append(address)
+            return 'ok'
+        self.assertEqual(speak.reach_phone(attempt), 'ok')
+        self.assertEqual(tried, ['100.64.0.9:47811'])
+
+    def test_remote_failing_falls_back_to_the_local_network(self):
+        self.write_config({'phone_token': '123456', 'phone': 'Example-iPhone.local:47811',
+                           'phone_remote': '100.64.0.9:47811'})
+        tried = []
+        def attempt(address):
+            tried.append(address)
+            if address.startswith('100.'):
+                raise OSError('unreachable')
+            return 'ok'
+        self.assertEqual(speak.reach_phone(attempt), 'ok')
+        self.assertEqual(tried, ['100.64.0.9:47811', 'Example-iPhone.local:47811'])

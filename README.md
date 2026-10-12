@@ -118,6 +118,7 @@ prints them; most are set by the commands below, and the rest you can edit by ha
 | `phone_mode` | `"text"` (the default; the phone speaks in its own voices) or `"audio"` (rendered on the Mac with `say -o` in `voice_en`, `voice_ja`, and `rate`, and played on the phone; `sakamoto phone-mode ...`) |
 | `phone_token` | the phone's pairing code (`sakamoto pair` sets it) |
 | `phone`, `phone_name` | the phone's `host:port` and Bonjour name, found and kept automatically |
+| `phone_remote` | another address for the phone, tried first, such as its Tailscale address (`"100.x.y.z:47811"`), so it's reached away from home too; when it fails, the local network as usual (empty by default) |
 | `app_voice_tap` | where `app-voice-tap` is, for `app-phone`, when it's not in `~/.local/bin` or on the PATH |
 | `dev_path` | for working on the plugin (see Development) |
 
@@ -243,7 +244,9 @@ opening text (letters and digits only, so formatting doesn't matter), waits up t
 to draw its button, and marks each button it presses, so an earlier response is never read by
 mistake. A button reads its whole block, and a reply that follows a notice rather than a new
 message can share a block with the reply before it; when the response starts well into its block,
-the button isn't pressed, and the Mac's or the phone's voices read just the new response. Each
+the button isn't pressed, and the Mac's or the phone's voices read just the new response. In the
+same way, a response that comes without a new prompt from you (after a notice, such as a background
+task finishing) skips the app's voice: the app would read the response before it too. Each
 press is logged in `speak.log`. When the debugger isn't on (it switches off whenever
 the app restarts) or the click fails, the Mac's own voice (`voice_en`, `voice_ja`) speaks instead,
 and `speak.log` says why. This relies on the app's current page structure, so an app update can
