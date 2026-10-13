@@ -1163,11 +1163,14 @@ class AppPhoneCommandTests(Isolated):
 class NothingToSay(unittest.TestCase):
     def test_an_ellipsis_or_an_emoji_is_nothing_to_say(self):
         for text in ('08:31 …', '8:31…', '…', '07:24 ...', ' 08:31 … ', '08:31 🦉', '08:31 🏓🎉',
-                     '08:31 👩🏻‍🔬', '🫖'):
+                     '08:31 👩🏻‍🔬', '🫖', '08:31 🎉 🤔', '08:31 🧜🏻‍♀️🕵🏻‍♀️🇯🇵',
+                     # Sakamoto Eyes' avatar escapes: become a mermaid, come back, think of herself.
+                     '09:06 👩🏻‍🔬🧜🏻‍♀️', '09:06 👩🏻‍🔬🧜🏻‍♀️🎉🤔', '09:06 👩🏻‍🔬👩🏻‍🔬', '09:06 👩🏻‍🔬👩🏻‍🔬👩🏻‍🔬'):
             self.assertTrue(speak.nothing_to_say(text), text)
 
     def test_anything_more_is_spoken(self):
-        for text in ('08:31 … hello', '08:31 Bumble', 'Wait…', '08:31', '08:31 🦉 owl', '08:31 ★☆★☆'):
+        for text in ('08:31 … hello', '08:31 Bumble', 'Wait…', '08:31', '08:31 🦉 owl', '08:31 ★☆★☆',
+                     '08:31 🎉🤔👍🦉', '09:06 👩🏻‍🔬🧜🏻‍♀️🎉🤔👍'):
             self.assertFalse(speak.nothing_to_say(text), text)
 
 if __name__ == '__main__':

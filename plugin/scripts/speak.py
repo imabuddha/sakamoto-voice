@@ -648,14 +648,52 @@ def touch(path):
 
 def nothing_to_say(text):
     """A response that is only an ellipsis or an emoji or two, after an optional time ("08:31 …",
-    "08:31 🦉")."""
+    "08:31 🦉"). Emoji count as people see them: a sequence joined by zero-width joiners
+    ("👩🏻‍🔬", "🧜🏻‍♀️") is one, and so is a flag. Up to three, plus Sakamoto Eyes' avatar escape (her
+    avatar before an emoji, "👩🏻‍🔬🧜🏻‍♀️": she becomes a mermaid), which shows on a phone and says
+    nothing either."""
     rest = re.sub(r'^\s*\d{1,2}:\d{2}', '', text).strip()
     if rest in ('…', '...'):
         return True
-    # Emoji: symbols (So), with their joiners, variation selectors, and skin tones.
+    units = emoji_units(rest)
+    if units is None:
+        return False
+    limit = 4 if units and units[0] == AVATAR else 3
+    return 0 < len(units) <= limit
+
+
+AVATAR = '👩🏻‍🔬'
+
+
+def emoji_units(text):
+    """The emoji in `text` as people see them (ZWJ sequences and flags joined), or None when it
+    holds anything else. Spaces between them are allowed."""
     glue = {'\u200d', '\ufe0f', '\ufe0e', '\u20e3'}
-    symbols = [c for c in rest if c not in glue and not 0x1F3FB <= ord(c) <= 0x1F3FF]
-    return 0 < len(symbols) <= 3 and all(unicodedata.category(c) == 'So' for c in symbols)
+    units, joined = [], False
+    for c in text:
+        if c.isspace():
+            joined = False
+            continue
+        if c == '\u200d':
+            joined = True
+            if not units:
+                return None
+            units[-1] += c
+            continue
+        if c in glue or 0x1F3FB <= ord(c) <= 0x1F3FF:
+            if not units:
+                return None
+            units[-1] += c
+            continue
+        if unicodedata.category(c) != 'So':
+            return None
+        regional = 0x1F1E6 <= ord(c) <= 0x1F1FF
+        if units and (joined or (regional and len(units[-1]) == 1 and 0x1F1E6 <= ord(units[-1]) <= 0x1F1FF)):
+            units[-1] += c
+        else:
+            units.append(c)
+        joined = False
+    return units
 
 
 def launch(text, prompted=True):
