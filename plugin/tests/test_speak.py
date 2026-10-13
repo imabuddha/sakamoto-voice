@@ -866,7 +866,7 @@ class FakeTap:
     def wait_ready(self):
         return self.ready
 
-    def relay(self, sock, timeout, record=None):
+    def relay(self, sock, timeout, record=None, copy=None):
         self.record = record
         self.relayed = sock
         return self.cut

@@ -1023,6 +1023,37 @@ def end_stream(sock, timeout=2.0):
         sock.close()
 
 
+VOICE_CLOCK_SOCKET = 'her-voice.sock'   # next to the hub's voice-route.json (phone_route)
+COPY_MAX = 2 * 2 * STREAM_RATE          # bytes: 2 s of the stream waiting for the hub, at most
+
+
+def voice_clock(cfg, text, rate=STREAM_RATE):
+    """Sakamoto Eyes' hub times the emoji in a reply to the voice reading it, from a copy of the
+    stream the phones get: a Unix socket next to its voice-route.json (phone_route). Returns the
+    connected socket, the header sent ({"text", "rate", "format", "channels"}, a line), or None
+    when there is no hub there. It never holds up the phones: see Tap.relay's `copy`."""
+    route = cfg.get('phone_route') or ''
+    if not route:
+        return None
+    path = os.path.join(os.path.dirname(os.path.expanduser(route)), VOICE_CLOCK_SOCKET)
+    if not os.path.exists(path):
+        return None
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        sock.connect(path)
+        header = {'text': text, 'rate': rate, 'format': 'pcm16', 'channels': 1}
+        sock.sendall(json.dumps(header, ensure_ascii=False, separators=(',', ':')).encode('utf-8') + b'\n')
+        sock.setblocking(False)
+        return sock
+    except OSError as e:
+        log(f'voice clock: {e}')
+        if sock:
+            sock.close()
+        return None
+
+
 def tap_path(cfg):
     """app-voice-tap: the config's app_voice_tap, ~/.local/bin (where mac/build.sh links it), the
     PATH, or bin/ in the checkout this script runs from; None when it isn't built."""
@@ -1072,11 +1103,13 @@ class Tap:
         """How much audio has been passed on, in seconds."""
         return self.sent / 2 / STREAM_RATE
 
-    def relay(self, sock, timeout, record=None):
+    def relay(self, sock, timeout, record=None, copy=None):
         """Passes its audio on to the phone until it ends it (closing its standard output), the
         phone closes the stream, sending fails, or `timeout` seconds pass. None when it ended by
         itself; else why the stream was cut short (it may still be running: stop() it). With
-        `record`, a WAV path, the audio is also kept there.
+        `record`, a WAV path, the audio is also kept there. With `copy` (voice_clock's socket),
+        the same bytes go to Sakamoto Eyes' hub as well, without ever waiting for it: a copy that
+        can't take a chunk whole is closed (the hub then times the rest by its pace).
 
         sock may be a list of sockets (several phones, Sakamoto Eyes' broadcast): a phone that
         ends its stream or fails is taken out of the list (logged), and the stream is cut short
@@ -1092,14 +1125,17 @@ class Tap:
                 log(f'recording: {e}')
                 wav = None
         try:
-            return self._relay(sock, timeout, wav)
+            return self._relay(sock, timeout, wav, copy)
         finally:
             if wav:
                 wav.close()
+            if copy:
+                copy.close()
 
-    def _relay(self, sock, timeout, wav):
+    def _relay(self, sock, timeout, wav, copy=None):
         socks = sock if isinstance(sock, list) else [sock]
         cut = None
+        copy_pending = bytearray()
 
         def drop(s, why):
             nonlocal cut
@@ -1135,6 +1171,19 @@ class Tap:
                     continue
                 if wav:
                     wav.writeframes(chunk)
+                if copy:
+                    # Never waited for: what the hub can't take yet waits here, up to 2 s of it.
+                    copy_pending += chunk
+                    try:
+                        del copy_pending[:copy.send(copy_pending)]
+                    except BlockingIOError:
+                        pass
+                    except OSError:
+                        copy_pending = bytearray(COPY_MAX + 1)
+                    if len(copy_pending) > COPY_MAX:
+                        log('voice clock: the hub took no more of her voice')
+                        copy.close()
+                        copy = None
                 for s in list(socks):
                     try:
                         s.sendall(chunk)
@@ -1145,6 +1194,12 @@ class Tap:
                 if not socks:
                     return cut
                 self.sent += len(chunk)
+        if copy and copy_pending:
+            try:      # the rest of her voice for the hub, waited for a moment at most
+                copy.settimeout(0.5)
+                copy.sendall(copy_pending)
+            except OSError:
+                pass
         return None
 
     def last_line(self):
@@ -1299,7 +1354,7 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
             return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found", 'not-clicked',
                             to=streamed)
         cut = tap.relay(live if len(live) > 1 else live[0], timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30,
-                        record=recording_path(raw))
+                        record=recording_path(raw), copy=voice_clock(cfg, raw))
         status = tap.stop(grace=0 if cut else 3.0)
     except BaseException:
         tap.stop(grace=0)
