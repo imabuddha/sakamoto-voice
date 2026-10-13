@@ -202,6 +202,7 @@ prints them; most are set by the commands below, and the rest you can edit by ha
 | `phone`, `phone_name` | the phone's `host:port` and Bonjour name, found and kept automatically |
 | `phone_remote` | another address for the phone, tried first, such as its Tailscale address (`"100.x.y.z:47811"`), so it's reached away from home too; when it fails, the local network as usual (empty by default) |
 | `phone_voice` | what the phone last said it wants for the Claude app's voice, `"stream"` or `"text"`, kept automatically from its every answer (empty until it has answered; a phone app older than 1.0 counts as `"stream"`); see "The phone has the last word" below |
+| `phone_route` | for Sakamoto Eyes (several phones, one per room): the path of its hub's `voice-route.json` (empty, the default, turns it off). A reply to a line the hub heard goes only to the phone in that room, with the Mac quiet so that phone's echo canceller can work; if that phone doesn't answer, nothing is heard (never a phone in another room). What Claude says unprompted, after a notice, goes to every connected phone at once, and to the Mac as `output` says. A typed prompt's reply goes as usual. Every phone needs the same pairing code. A route older than 30 minutes changes nothing |
 | `app_voice_tap` | where `app-voice-tap` is, for `app-phone`, when it's not in `~/.local/bin` or on the PATH |
 | `dev_path` | for working on the plugin (see Development) |
 
@@ -222,7 +223,8 @@ Voice (`ios/`), and the Mac sends it each response over the local network. The a
 
 - **Listens** on the local network (TCP, advertised with Bonjour as `_sakamotovoice._tcp`, port
   47811 when it's free). Each connection carries one JSON message, which the app answers with a
-  JSON ack, or a live audio stream: a JSON header line, answered at once, then raw 16-bit PCM until
+  JSON ack, or a live audio stream: a JSON header line (its pairing code first and the text last, so
+  the phone can check the code before reading a long reply), answered at once, then raw 16-bit PCM until
   the Mac closes it. Every ack to a message with the right pairing code also says what the phone
   wants for the Claude app's voice, `"voice": "stream"` or `"voice": "text"`, and a stream's header
   that arrives while it wants the text is declined, which isn't an error:

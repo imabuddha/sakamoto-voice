@@ -53,6 +53,23 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
   phone_remote  another address for the phone, tried first: e.g. its Tailscale address
             ("100.x.y.z:47811"), so the phone is reached away from home too; when it fails, the
             local network as usual.
+  phone_route  Sakamoto Eyes' voice route: the path of its hub's voice-route.json (empty: off).
+            The hub names there, with each line it hears, the phone in the room where the
+            conversation is and its addresses, and lists every connected phone that plays her
+            voice ("phones"). Where a response goes depends on the prompt it answers (the
+            UserPromptSubmit hook keeps its kind in last-prompt):
+            - a line the hub heard and its relay typed ("👂 Lab: …"): only the routed phone (its
+              addresses in turn; when none answers, silence, never the phone above, which may be
+              in another room), with the Mac quiet ("both" plays as "phone", "app-both" as
+              "app-phone"), so that phone's echo canceller can take her voice out of what it
+              hears. When the Claude app's voice can't be streamed there, the phone's "fallback"
+              decides: "stream_only" (the phone by the Mac, its back camera): nothing is heard;
+              "any" (the phone held facing you): the text in the phone's own voices. A route older
+              than 30 minutes, or naming no address, changes nothing;
+            - no prompt (a response to a notice: she speaks unprompted): every listed phone (the
+              app's voice streamed to all at once), and the Mac as output says;
+            - a typed prompt: as without phone_route.
+            Every phone needs the same pairing code (phone_token).
   dev_path  for working on the plugin: a checkout's plugin/ folder. The installed (cached) copy then
             runs that checkout's speak.py instead, so edits there take effect with the next
             response, without a plugin update or a restart (changes to hooks.json still need both).
@@ -86,6 +103,9 @@ PIDFILE = os.path.join(HOME, 'speaker.pid')
 # response the app's voice is skipped (see speak()).
 PROMPTED = os.path.join(HOME, 'prompted')
 RESPONDED = os.path.join(HOME, 'responded')
+# What kind of prompt the last one was (note_prompt): {"heard": a 👂 line Sakamoto Eyes' relay
+# typed, "rooms", "at_unix"}, for where a reply goes (phone_route).
+LAST_PROMPT = os.path.join(HOME, 'last-prompt')
 # While the Claude app's Read aloud reads a response (app_read clicked): {"started", "ends" (Unix
 # times; the end estimated from the text), "text"}. Its speaker has exited by then, so this is how
 # Sakamoto Eyes' hub knows her voice is on (for its echo guard and barge-in).
@@ -95,7 +115,7 @@ LOG_MAX = 64 * 1024          # then speak.log becomes speak.log.1, replacing the
 DEFAULTS = {'enabled': True, 'voice_en': '', 'voice_ja': 'Kyoko', 'default_lang': 'auto', 'rate': 0,
             'device': '', 'max_chars': 6000,
             'output': 'mac', 'phone_mode': 'text', 'phone_token': '', 'phone': '', 'phone_name': '',
-            'app_voice_tap': '', 'dev_path': '', 'phone_remote': '', 'phone_voice': ''}
+            'app_voice_tap': '', 'dev_path': '', 'phone_remote': '', 'phone_voice': '', 'phone_route': ''}
 OUTPUTS = ('mac', 'phone', 'both', 'app', 'app-both', 'app-phone')
 PHONE_OUTPUTS = ('phone', 'both', 'app-both', 'app-phone')       # the outputs a stop also tells the phone
 PHONE_MODES = ('text', 'audio')
@@ -128,6 +148,124 @@ def remember(**changes):
     cfg.update(changes)
     save(cfg)
     return cfg
+
+
+ROUTE_MAX_AGE = 30 * 60      # seconds: an older voice route is ignored
+ROUTED_OUTPUTS = {'both': 'phone', 'app-both': 'app-phone'}   # the Mac stays quiet under a route
+
+
+def addresses_of(entry):
+    """The "host:port" strings in a route's or a listed phone's `addresses`."""
+    return [a for a in entry.get('addresses') or [] if isinstance(a, str) and a]
+
+
+def route_file(cfg):
+    """Sakamoto Eyes' voice-route.json (phone_route) as a dict; {} when off or unreadable."""
+    path = cfg.get('phone_route') or ''
+    if not path:
+        return {}
+    try:
+        with open(os.path.expanduser(path), encoding='utf-8') as f:
+            route = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return route if isinstance(route, dict) else {}
+
+
+def voice_route(cfg, now=None):
+    """Sakamoto Eyes' voice route (phone_route, its hub's voice-route.json: {"room", "phone",
+    "addresses", "fallback", "at_unix", "phones", …}), or None when there is none, it is older
+    than ROUTE_MAX_AGE, names no address, or can't be read."""
+    route = route_file(cfg)
+    try:
+        age = (now or time.time()) - float(route.get('at_unix', 0))
+    except (TypeError, ValueError):
+        return None
+    addresses = addresses_of(route)
+    if not addresses or not 0 <= age <= ROUTE_MAX_AGE:
+        return None
+    return dict(route, addresses=addresses)
+
+
+def route_addresses(cfg, now=None):
+    """The addresses ("host:port") of the phone the voice route names; [] without a route."""
+    route = voice_route(cfg, now)
+    return route['addresses'] if route else []
+
+
+def listed_phones(cfg):
+    """The phones the hub lists as connected and playing her voice (voice-route.json's
+    "phones"), each {"name", "room", "addresses", "fallback"}; [] when none or off."""
+    phones = route_file(cfg).get('phones')
+    if not isinstance(phones, list):
+        return []
+    return [dict(p, addresses=addresses_of(p)) for p in phones if isinstance(p, dict) and addresses_of(p)]
+
+
+# The kind of turn a response ends: 'heard', a reply to a line Sakamoto
+# Eyes heard and its relay typed ("👂 Lab: …"); 'typed', a reply to a prompt typed at the
+# keyboard; 'notice', a response with no prompt since the one before (a background task's
+# notice, say): she speaks unprompted.
+HEARD = re.compile(r'^\s*👂\s*([^:(]+?)\s*(?:\([^)]*\))?:\s')
+
+
+def heard_rooms(prompt):
+    """The rooms of a 👂 line ("👂 Lab + Den: …" → ["Lab", "Den"]), or None when the
+    prompt isn't one."""
+    match = HEARD.match(prompt) if isinstance(prompt, str) else None
+    return [r.strip() for r in match.group(1).split(' + ') if r.strip()] if match else None
+
+
+def note_prompt(prompt, now=None):
+    """Keeps what kind of prompt the last one was (LAST_PROMPT), for the response's turn."""
+    rooms = heard_rooms(prompt)
+    try:
+        os.makedirs(HOME, exist_ok=True)
+        with open(LAST_PROMPT, 'w', encoding='utf-8') as f:
+            json.dump({'heard': rooms is not None, 'rooms': rooms or [], 'at_unix': now or time.time()}, f)
+    except OSError as e:
+        log(f'prompt: {e}')
+
+
+def turn_kind(prompted):
+    """'notice' for a response without a new prompt; else 'heard' when the last prompt was a 👂
+    line, 'typed' otherwise."""
+    if not prompted:
+        return 'notice'
+    try:
+        with open(LAST_PROMPT, encoding='utf-8') as f:
+            return 'heard' if json.load(f).get('heard') else 'typed'
+    except (OSError, ValueError, AttributeError):
+        return 'typed'
+
+
+def routed(cfg, turn='heard'):
+    """The settings for speaking this turn under Sakamoto Eyes (phone_route). Never saved.
+    - 'heard' (a reply to a 👂 line), with a fresh route: her voice goes only to the routed phone
+      (`targets`; silent when it doesn't answer: never the usual phone, which may be in another
+      room), and the Mac stays quiet ("both" as "phone", "app-both" as
+      "app-phone"). When the app's voice can't be streamed there, the phone's own choice (its
+      `fallback`): "stream_only" (silence) or "any" (the text in its voices; also
+      when it doesn't say).
+    - 'notice' (she speaks unprompted), with phones listed: every one of them (`targets`), and
+      the Mac as `output` says.
+    - 'typed', or no route or list: unchanged."""
+    if turn == 'heard':
+        route = voice_route(cfg)
+        if not route:
+            return cfg
+        target = {'name': route.get('phone') or route.get('room') or 'the routed phone',
+                  'addresses': route['addresses'], 'fallback': route.get('fallback') or 'any'}
+        return dict(cfg, output=ROUTED_OUTPUTS.get(cfg.get('output'), cfg.get('output')), targets=[target])
+    if turn == 'notice':
+        phones = listed_phones(cfg)
+        if phones:
+            return dict(cfg, targets=[dict(p, fallback=p.get('fallback') or 'any') for p in phones])
+    return cfg
+
+
+def target_name(target):
+    return target['name'] if target else 'the phone'
 
 
 def log(message):
@@ -478,14 +616,25 @@ def find_phone(token, browse_seconds=2.0):
     return None
 
 
-def reach_phone(attempt):
+def reach_phone(attempt, target=None):
     """`attempt(address)` at the remembered phone, and, when that raises OSError or ValueError, at
     the phone found again (and remembered). Returns what it returns, or None when no phone could be
-    reached; logs what went wrong."""
+    reached; logs what went wrong.
+
+    target: a phone Sakamoto Eyes named (routed()'s `targets`): only its addresses are tried, in
+    order, and nothing else when they fail (the usual phone may be in another room)."""
     cfg = config()
     token = cfg.get('phone_token', '')
     if not token:
         log('phone: not paired (speak.py pair CODE)')
+        return None
+    if target is not None:
+        for address in target['addresses']:
+            try:
+                return attempt(address)
+            except (OSError, ValueError) as e:
+                log(f'phone: {target_name(target)} at {address} (phone_route): {e}')
+        log(f'phone: {target_name(target)} did not answer; silent there')
         return None
     remote = cfg.get('phone_remote', '')
     if remote:                     # e.g. its Tailscale address: works at home and away
@@ -513,10 +662,11 @@ def reach_phone(attempt):
         return None
 
 
-def send_to_phone(payload, timeout=10.0):
-    """Sends to the remembered phone, finding it again (and remembering it) when that fails.
-    Returns the phone's answer, or None when no phone could be reached; logs what went wrong."""
-    return reach_phone(lambda address: exchange(address, payload, timeout))
+def send_to_phone(payload, timeout=10.0, target=None):
+    """Sends to the remembered phone, finding it again (and remembering it) when that fails, or
+    to `target` alone (reach_phone). Returns the phone's answer, or None when no phone could be
+    reached; logs what went wrong."""
+    return reach_phone(lambda address: exchange(address, payload, timeout), target)
 
 
 def concat_wavs(paths, out_path, gap=0.12):
@@ -575,23 +725,46 @@ def phone_payload(cfg, text, runs, mac_runs, voices):
 
 
 def deliver_to_phone(cfg, text, runs, mac_runs, voices):
+    """The response to the phone, or to each of routed()'s `targets` (at once, in parallel)."""
+    timeout = 30.0 if cfg.get('phone_mode') == 'audio' else 10.0
+
+    def deliver(payload, target):
+        try:
+            ack = send_to_phone(payload, timeout=timeout, target=target)
+            if ack is not None and not ack.get('ok'):
+                log(f'phone: refused: {ack.get("error")}' + (f' ({target_name(target)})' if target else ''))
+        except Exception as e:   # the speaker never fails loudly; the log says why
+            log(f'phone: {type(e).__name__}: {e}')
+
     try:
-        ack = send_to_phone(phone_payload(cfg, text, runs, mac_runs, voices),
-                            timeout=30.0 if cfg.get('phone_mode') == 'audio' else 10.0)
-        if ack is not None and not ack.get('ok'):
-            log(f'phone: refused: {ack.get("error")}')
-    except Exception as e:   # the speaker never fails loudly; the log says why
+        payload = phone_payload(cfg, text, runs, mac_runs, voices)
+    except Exception as e:
         log(f'phone: {type(e).__name__}: {e}')
+        return
+    targets = cfg.get('targets')
+    if not targets:
+        deliver(payload, None)
+        return
+    threads = [threading.Thread(target=deliver, args=(payload, t)) for t in targets]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
 
 def stop_phone(cfg):
-    """Silences the phone, quickly and only at its remembered address (phone_remote first)."""
-    address = cfg.get('phone_remote') or cfg.get('phone')
-    if cfg.get('output') in PHONE_OUTPUTS and address and cfg.get('phone_token'):
+    """Silences the phone, quickly and only at its remembered address (phone_remote first), and,
+    under Sakamoto Eyes (phone_route), the routed phone and every phone the hub lists, before
+    it (each at its first address)."""
+    if cfg.get('output') not in PHONE_OUTPUTS or not cfg.get('phone_token'):
+        return
+    addresses = route_addresses(cfg)[:1] + [addresses_of(p)[0] for p in listed_phones(cfg)] \
+        + [cfg.get('phone_remote') or cfg.get('phone')]
+    for address in dict.fromkeys(a for a in addresses if a):
         try:
             exchange(address, message(cfg['phone_token'], 'stop'), timeout=1.5)
         except (OSError, ValueError) as e:
-            log(f'phone: stop: {e}')
+            log(f'phone: stop: {address}: {e}')
 
 
 # ---- Speaking -------------------------------------------------------------------------------
@@ -620,9 +793,9 @@ def is_notice(prompt):
     return isinstance(prompt, str) and prompt.lstrip().startswith(NOTICE_TAGS)
 
 
-def hook_notice():
-    """When stdin is a UserPromptSubmit hook's JSON whose prompt is a notice, the notice's tag;
-    else ''. (Typed at a terminal, stdin isn't read.)"""
+def hook_prompt():
+    """When stdin is a UserPromptSubmit hook's JSON, its prompt; else ''. (Typed at a terminal,
+    stdin isn't read.)"""
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return ''
@@ -633,7 +806,12 @@ def hook_notice():
         prompt = json.load(sys.stdin).get('prompt', '')
     except (ValueError, OSError, AttributeError):
         return ''
-    return prompt.lstrip()[1:].split('>', 1)[0].split()[0][:30] if is_notice(prompt) else ''
+    return prompt if isinstance(prompt, str) else ''
+
+
+def notice_tag(prompt):
+    """A notice's tag ("task-notification"), for the log."""
+    return prompt.lstrip()[1:].split('>', 1)[0].split()[0][:30]
 
 
 def touch(path):
@@ -696,14 +874,15 @@ def emoji_units(text):
     return units
 
 
-def launch(text, prompted=True):
-    """Hand text to a detached speaker, silencing any earlier one."""
+def launch(text, prompted=True, turn=None):
+    """Hand text to a detached speaker, silencing any earlier one. turn: turn_kind()'s, for
+    Sakamoto Eyes' routing (None: 'typed', or 'notice' when not prompted)."""
     stop_speaker()
     fd, path = tempfile.mkstemp(prefix='sakamoto-voice-', suffix='.txt')
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(text)
     subprocess.Popen([sys.executable, os.path.abspath(__file__), '--speak', path]
-                     + ([] if prompted else ['--unprompted']),
+                     + ([] if prompted else ['--unprompted']) + (['--turn', turn] if turn else []),
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
 
@@ -789,12 +968,13 @@ STREAM_SEND_TIMEOUT = 5.0     # a phone that takes no audio for this long is giv
 
 
 def stream_header(token, text='', rate=STREAM_RATE):
-    """A stream's header line, as bytes with its newline (as VoiceMessage.streamHeader in
-    Message.swift makes it)."""
-    msg = {'channels': 1, 'format': 'pcm16', 'kind': 'stream', 'rate': rate, 'token': token}
+    """A stream's header line, as bytes with its newline: the same keys as VoiceMessage.streamHeader
+    in Message.swift, but the token first and the text last, so a receiver can check the code in
+    the line's first bytes, however long the text."""
+    msg = {'token': token, 'channels': 1, 'format': 'pcm16', 'kind': 'stream', 'rate': rate}
     if text:
         msg['text'] = text
-    return json.dumps(msg, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8') + b'\n'
+    return json.dumps(msg, ensure_ascii=False, separators=(',', ':')).encode('utf-8') + b'\n'
 
 
 def open_stream(address, header, timeout=STREAM_ANSWER_TIMEOUT):
@@ -896,7 +1076,11 @@ class Tap:
         """Passes its audio on to the phone until it ends it (closing its standard output), the
         phone closes the stream, sending fails, or `timeout` seconds pass. None when it ended by
         itself; else why the stream was cut short (it may still be running: stop() it). With
-        `record`, a WAV path, the audio is also kept there."""
+        `record`, a WAV path, the audio is also kept there.
+
+        sock may be a list of sockets (several phones, Sakamoto Eyes' broadcast): a phone that
+        ends its stream or fails is taken out of the list (logged), and the stream is cut short
+        only when none is left."""
         wav = None
         if record:
             try:
@@ -914,8 +1098,19 @@ class Tap:
                 wav.close()
 
     def _relay(self, sock, timeout, wav):
+        socks = sock if isinstance(sock, list) else [sock]
+        cut = None
+
+        def drop(s, why):
+            nonlocal cut
+            cut = why
+            socks.remove(s)
+            watched.remove(s)
+            if socks:
+                log(f'app-phone: one phone of several: {why}')
+
         out, err = self.proc.stdout.fileno(), self.proc.stderr.fileno()
-        watched = [out, err, sock]
+        watched = [out, err] + socks
         end = time.monotonic() + timeout
         while out in watched:
             left = end - time.monotonic()
@@ -924,13 +1119,15 @@ class Tap:
             ready, _, _ = select.select(watched, [], [], left)
             if err in ready and not self._read_status():
                 watched.remove(err)
-            if sock in ready:
+            for s in [s for s in socks if s in ready]:
                 # The phone sends nothing after its answer, so this is its end of the stream.
                 try:
-                    if not sock.recv(4096):
-                        return 'the phone ended the stream (a newer message or Stop)'
+                    if not s.recv(4096):
+                        drop(s, 'the phone ended the stream (a newer message or Stop)')
                 except OSError as e:
-                    return f'the phone ended the stream ({e})'
+                    drop(s, f'the phone ended the stream ({e})')
+            if not socks:
+                return cut
             if out in ready:
                 chunk = os.read(out, 65536)
                 if not chunk:
@@ -938,12 +1135,15 @@ class Tap:
                     continue
                 if wav:
                     wav.writeframes(chunk)
-                try:
-                    sock.sendall(chunk)
-                except socket.timeout:
-                    return f'the phone took no audio for {STREAM_SEND_TIMEOUT:.0f} s'
-                except OSError as e:
-                    return f'sending to the phone failed ({e})'
+                for s in list(socks):
+                    try:
+                        s.sendall(chunk)
+                    except socket.timeout:
+                        drop(s, f'the phone took no audio for {STREAM_SEND_TIMEOUT:.0f} s')
+                    except OSError as e:
+                        drop(s, f'sending to the phone failed ({e})')
+                if not socks:
+                    return cut
                 self.sent += len(chunk)
         return None
 
@@ -1008,12 +1208,28 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
     A phone that wants the text (its Claude's Voice setting) declines the stream; that's kept as
     phone_voice (open_stream), so the next response doesn't try, and this one's text is sent
     (for app-both, 'before-click': the app's voice on the Mac, the text to the phone)."""
-    def fallback(reason, stage='before-click'):
+    targets = cfg.get('targets') or [None]     # None: the usual phone (reach_phone)
+
+    def fallback(reason, stage='before-click', to=None):
+        """No stream for the phones in `to` (all of them by default): for app-both, `stage`;
+        else send_text()."""
         if both:
             log(f'app-both: {reason}')
             return stage
-        log(f'app-phone: {reason}; sending the text to the phone')
-        deliver_to_phone(dict(cfg, phone_mode='text'), text, runs, mac_runs, voices)
+        send_text(reason, targets if to is None else to)
+
+    def send_text(reason, to):
+        """The text to the phones in `to`, each as its `fallback` says (a phone that plays only
+        the streamed voice stays silent)."""
+        silent = [t for t in to if t and t.get('fallback') == 'stream_only']
+        texts = [t for t in to if t not in silent]
+        if silent:
+            log(f'app-phone (voice route): {reason}; silent on {", ".join(map(target_name, silent))}: '
+                'it plays only the streamed voice')
+        if texts:
+            log(f'app-phone: {reason}; sending the text to ' + ', '.join(map(target_name, texts)))
+            deliver_to_phone(dict(cfg, phone_mode='text', targets=[t for t in texts if t]),
+                             text, runs, mac_runs, voices)
 
     token = cfg.get('phone_token', '')
     if not token:
@@ -1024,50 +1240,86 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
         return fallback('app-voice-tap is not built (run mac/build.sh)')
     started = time.monotonic()
     header = stream_header(token, text)
-    opened = reach_phone(lambda address: open_stream(address, header))   # finds the phone again if it moved
-    if not opened:
-        log('app-phone: the phone did not answer (unreachable)' + ('' if both else '; nothing read aloud'))
+    streams, no_answer, want_text, failures = [], [], [], []
+    for target in targets:
+        # The usual phone is found again if it moved; a routed one is tried only where it is.
+        opened = reach_phone(lambda address: open_stream(address, header), target)
+        if not opened:
+            failures.append(f'{target_name(target)} did not answer (unreachable)')
+            continue
+        sock, ack = opened
+        if ack is None:
+            sock.close()
+            no_answer.append(target)
+        elif not ack.get('ok'):
+            sock.close()
+            if ack.get('want') == 'text':
+                want_text.append(target)
+            else:
+                failures.append(f'{target_name(target)} refused the stream ({ack.get("error")})')
+        else:
+            streams.append((target, sock))
+    if not streams:
+        if no_answer:
+            return fallback("the phone didn't answer the stream (is its app 0.3.0 or later?)", to=no_answer)
+        if want_text:
+            return fallback('the phone wants the text, not the stream (its Claude\'s Voice setting)', to=want_text)
+        log('app-phone: ' + '; '.join(failures) + ('' if both else '; nothing read aloud'))
         return 'before-click' if both else None
-    sock, ack = opened
-    if ack is None:
-        sock.close()
-        return fallback("the phone didn't answer the stream (is its app 0.3.0 or later?)")
-    if not ack.get('ok'):
-        sock.close()
-        if ack.get('want') == 'text':
-            return fallback('the phone wants the text, not the stream (its Claude\'s Voice setting)')
-        log(f'app-phone: the phone refused the stream ({ack.get("error")})' + ('' if both else '; nothing read aloud'))
-        return 'before-click' if both else None
+    for failure in failures:
+        log(f'app-phone: {failure}')
+    # Some phones stream: the others get the text now, as their settings say.
+    if no_answer:
+        send_text("the phone didn't answer the stream", no_answer)
+    if want_text:     # their own choice: the text, whatever their fallback
+        log('app-phone: ' + ', '.join(map(target_name, want_text)) + ' wants the text; sending it')
+        deliver_to_phone(dict(cfg, phone_mode='text', targets=[t for t in want_text if t]), text, runs, mac_runs,
+                         voices)
+    socks = [sock for _, sock in streams]
+    streamed = [target for target, _ in streams]
+
+    def close_all():
+        for sock in socks:
+            sock.close()
+
     try:
         tap = Tap(path, mute=not both)
     except OSError as e:
-        sock.close()
-        return fallback(f'app-voice-tap did not start: {e}')
+        close_all()
+        return fallback(f'app-voice-tap did not start: {e}', to=streamed)
+    live = list(socks)     # the phones still streaming (relay takes out the ones that end)
     try:
         if not tap.wait_ready():
             tap.stop(grace=0)
-            sock.close()
-            return fallback(f'app-voice-tap did not start: {tap.last_line()}')
+            close_all()
+            return fallback(f'app-voice-tap did not start: {tap.last_line()}', to=streamed)
         if not app_read(raw, delay=max(0.0, APP_READ_DELAY - (time.monotonic() - started))):
             tap.stop(grace=0)
-            sock.close()
-            return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found", 'not-clicked')
-        cut = tap.relay(sock, timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30, record=recording_path(raw))
+            close_all()
+            return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found", 'not-clicked',
+                            to=streamed)
+        cut = tap.relay(live if len(live) > 1 else live[0], timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30,
+                        record=recording_path(raw))
         status = tap.stop(grace=0 if cut else 3.0)
     except BaseException:
         tap.stop(grace=0)
-        sock.close()
+        close_all()
         raise
     if cut:
-        sock.close()
+        close_all()
         log(f'app-phone: {cut}, after {tap.seconds:.1f} s; app-voice-tap: {tap.last_line()}')
     elif status == TAP_NO_SOUND:
-        sock.close()
-        return fallback(f'no sound from the Claude app ({tap.last_line()})', 'no-sound')
+        close_all()
+        return fallback(f'no sound from the Claude app ({tap.last_line()})', 'no-sound', to=streamed)
     else:
-        end_stream(sock)
+        for sock in socks:
+            if sock in live:
+                end_stream(sock)
+            else:
+                sock.close()
+        phones = '' if len(socks) == 1 else f' ({len(live)} of {len(socks)} phones)'
         if status == 0:
-            log(f'app-phone: {tap.seconds:.1f} s to the phone; app-voice-tap: {tap.last_line()}')
+            log(f'app-phone: {tap.seconds:.1f} s to the phone{phones}; app-voice-tap: {tap.last_line()}')
         else:
             log(f'app-phone: app-voice-tap stopped with status {status}: {tap.last_line()}')
 
@@ -1093,7 +1345,7 @@ def say_command(cfg, voices, lang, play=True):
     return cmd
 
 
-def speak(path, prompted=True):
+def speak(path, prompted=True, turn=None):
     with open(PIDFILE, 'w') as f:
         f.write(str(os.getpgrp()))
     try:
@@ -1102,7 +1354,10 @@ def speak(path, prompted=True):
     finally:
         os.remove(path)
     raw = text
-    cfg = config()
+    turn = turn or ('typed' if prompted else 'notice')
+    cfg = routed(config(), turn)
+    if cfg.get('targets') and cfg.get('output') in PHONE_OUTPUTS:
+        log(f'voice route ({turn}): ' + ', '.join(map(target_name, cfg['targets'])))
     voices = installed_voices()
     limit = int(cfg.get('max_chars') or 0)
     if limit and len(text) > limit:
@@ -1195,7 +1450,8 @@ def phone_test(text):
 def main():
     args = sys.argv[1:]
     if args[:1] == ['--speak']:
-        speak(args[1], prompted='--unprompted' not in args)
+        turn = args[args.index('--turn') + 1] if '--turn' in args[:-1] else None
+        speak(args[1], prompted='--unprompted' not in args, turn=turn)
         return 0
     if args:
         cfg = config()
@@ -1211,11 +1467,13 @@ def main():
             # From the UserPromptSubmit hook, stdin holds the prompt. Claude Code delivers notices
             # (a background task finishing, say) as prompts too; those neither count as a prompt
             # from you nor silence the voice.
-            notice = hook_notice()
-            if notice:
-                log(f'prompt: a notice ({notice}); the voice carries on')
+            prompt = hook_prompt()
+            if is_notice(prompt):
+                log(f'prompt: a notice ({notice_tag(prompt)}); the voice carries on')
                 return 0
             touch(PROMPTED)
+            if prompt:
+                note_prompt(prompt)     # a 👂 line or typed, for where the reply goes (phone_route)
             stop_speaker()
             stop_phone(cfg)
         elif cmd == 'hush':
@@ -1273,7 +1531,7 @@ def main():
         os.path.getmtime(PROMPTED) >= os.path.getmtime(RESPONDED)
     touch(RESPONDED)
     if text:
-        launch(text, prompted)
+        launch(text, prompted, turn_kind(prompted))
     return 0
 
 
