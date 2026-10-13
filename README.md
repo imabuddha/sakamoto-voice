@@ -144,8 +144,8 @@ and on the phone, and sending a new message silences it (a UserPromptSubmit hook
 after a routine notice, and speaking it would only cut off a reading in progress. Subagents don't
 speak (they end with SubagentStop, not Stop).
 
-While the speaker runs, `~/.config/sakamoto-voice/speaker.pid` names it. Sakamoto Eyes (the
-listening companion) watches that file to know when her voice is on, and runs `speak.py hush`
+While the speaker runs, `~/.config/sakamoto-voice/speaker.pid` names it. Sakamoto Eyes (a
+listening companion, in development and not yet public) watches that file to know when her voice is on, and runs `speak.py hush`
 when you start talking over her (barge-in): it silences her as `stop` does, without counting as a
 prompt, and logs a "barge-in" line in `speak.log`.
 
