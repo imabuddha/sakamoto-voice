@@ -908,6 +908,8 @@ def read_key(text, length=40):
 READ_WORDS_PER_SECOND = 2.75    # the Claude app's English voice, about 165 words a minute
 READ_JA_PER_SECOND = 6.5        # and its Japanese, in characters
 READ_LEAD = 1.5                 # seconds from the click to its first word
+BABBLE_FACTOR = 2.0             # her streamed voice is cut once it runs past the larger of its
+BABBLE_MARGIN = 8.0             # reading's estimate times this and the estimate plus this (seconds)
 
 
 def reading_seconds(text):
@@ -917,6 +919,27 @@ def reading_seconds(text):
     ja = sum(len(re.sub(r'[\s、。！？]', '', t)) for lang, t in spans if lang == 'ja')
     words = sum(len(re.findall(r'[^\W_]+', t)) for lang, t in spans if lang != 'ja')
     return READ_LEAD + words / READ_WORDS_PER_SECOND + ja / READ_JA_PER_SECOND
+
+
+def babble_limit(text, cfg=None):
+    """Seconds of the streamed voice after which it is babble, not her reply (Sakamoto Eyes P2.9;
+    2026-10-14 19:12: the Claude app's Read aloud read about 6 s of text and went on "speaking"
+    garbled, Japanese-sounding babble for 25.7 s): the larger of the reading's estimate
+    (reading_seconds, without its lead) times babble_factor and the estimate plus babble_margin
+    (2 and 8 s by default; 0 for either: no limit). Looser than Sakamoto Eyes' hub's own cut
+    (1.5 times, or 4 s more, with a fade on the phones), which comes first when the hub runs:
+    this one is the backstop without it. Tried on 188 real readings of 2026-10-14: it cut the
+    three that babbled and none of the others (the closest at 84% of its limit)."""
+    cfg = cfg or {}
+    try:
+        factor = float(cfg.get('babble_factor', BABBLE_FACTOR))
+        margin = float(cfg.get('babble_margin', BABBLE_MARGIN))
+    except (TypeError, ValueError):
+        factor, margin = BABBLE_FACTOR, BABBLE_MARGIN
+    if factor <= 0 or margin <= 0:
+        return None
+    expected = max(0.0, reading_seconds(text) - READ_LEAD)
+    return max(expected * factor, expected + margin)
 
 
 def note_app_reading(text, now=None):
@@ -1062,7 +1085,7 @@ def hub_socket(cfg):
     return path if os.path.exists(path) else None
 
 
-def voice_clock(cfg, text, rate=STREAM_RATE, mac=False, audio=True):
+def voice_clock(cfg, text, rate=STREAM_RATE, mac=False, audio=True, phones=None):
     """Sakamoto Eyes' hub times the emoji in a reply to the voice reading it, from a copy of the
     stream the phones get: a Unix socket next to its voice-route.json (phone_route). Returns the
     connected socket, the header sent ({"text", "rate", "format", "channels", "mac"}, a line), or
@@ -1073,7 +1096,11 @@ def voice_clock(cfg, text, rate=STREAM_RATE, mac=False, audio=True):
     the phones that would hear them don't listen meanwhile (a phone's echo canceller takes out
     only what that phone plays). `mac`: her voice plays on the Mac's speakers (app-both, or the
     app's voice on the Mac alone, tapped unmuted). `audio` False: no audio follows (`say` on the
-    Mac, or no tap): the connection, open while her voice plays, is the whole message."""
+    Mac, or no tap): the connection, open while her voice plays, is the whole message.
+
+    Sakamoto Eyes P2.9: `phones`, the names of the phones the stream goes to, so the hub never
+    tells them to stop listening while the Mac plays her voice too (app-both): each plays it
+    itself, and its echo canceller takes it out."""
     path = hub_socket(cfg)
     if not path:
         return None
@@ -1085,6 +1112,8 @@ def voice_clock(cfg, text, rate=STREAM_RATE, mac=False, audio=True):
         header = {'text': text, 'rate': rate, 'format': 'pcm16', 'channels': 1, 'mac': bool(mac)}
         if not audio:
             header['audio'] = False
+        if phones:
+            header['phones'] = list(phones)
         sock.sendall(json.dumps(header, ensure_ascii=False, separators=(',', ':')).encode('utf-8') + b'\n')
         sock.setblocking(False)
         return sock
@@ -1144,9 +1173,10 @@ class Tap:
         """How much audio has been passed on, in seconds."""
         return self.sent / 2 / STREAM_RATE
 
-    def relay(self, sock, timeout, record=None, copy=None):
+    def relay(self, sock, timeout, record=None, copy=None, limit=None):
         """Passes its audio on to the phone until it ends it (closing its standard output), the
-        phone closes the stream, sending fails, or `timeout` seconds pass. None when it ended by
+        phone closes the stream, sending fails, or `timeout` seconds pass, or (`limit`) more than
+        `limit` seconds of audio have gone (babble: babble_limit). None when it ended by
         itself; else why the stream was cut short (it may still be running: stop() it). With
         `record`, a WAV path, the audio is also kept there. With `copy` (voice_clock's socket),
         the same bytes go to Sakamoto Eyes' hub as well, without ever waiting for it: a copy that
@@ -1167,14 +1197,14 @@ class Tap:
                 log(f'recording: {e}')
                 wav = None
         try:
-            return self._relay(sock, timeout, wav, copy)
+            return self._relay(sock, timeout, wav, copy, limit)
         finally:
             if wav:
                 wav.close()
             if copy:
                 copy.close()
 
-    def _relay(self, sock, timeout, wav, copy=None):
+    def _relay(self, sock, timeout, wav, copy=None, limit=None):
         socks = sock if isinstance(sock, list) else [sock]
         phones = bool(socks)        # False: the hub's copy only
         cut = None
@@ -1237,6 +1267,8 @@ class Tap:
                 if phones and not socks:
                     return cut
                 self.sent += len(chunk)
+                if limit is not None and self.seconds > limit:
+                    return f'babble cut at {self.seconds:.1f} s (its limit {limit:.1f} s)'
         if copy and copy_pending:
             try:      # the rest of her voice for the hub, waited for a moment at most
                 copy.settimeout(0.5)
@@ -1396,8 +1428,10 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
             close_all()
             return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found", 'not-clicked',
                             to=streamed)
+        names = [target_name(t) if t else cfg.get('phone_name') or 'the phone' for t in streamed]
         cut = tap.relay(live if len(live) > 1 else live[0], timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30,
-                        record=recording_path(raw), copy=voice_clock(cfg, raw, mac=both))
+                        record=recording_path(raw), copy=voice_clock(cfg, raw, mac=both, phones=names),
+                        limit=babble_limit(raw, cfg))
         status = tap.stop(grace=0 if cut else 3.0)
     except BaseException:
         tap.stop(grace=0)

@@ -785,6 +785,17 @@ class TapTests(FakeToolCase):
         self.assertEqual(tap.relay(self.pair()[0], timeout=0.3), 'still going after 0 s')
         self.assertLess(tap.stop(grace=0), 0)
 
+    def test_babble_past_its_limit_is_cut(self):
+        tap = self.tap('endless')
+        self.assertTrue(tap.wait_ready())
+        mine, phone = self.pair()
+        received = bytearray()
+        drain(phone, received)
+        cut = tap.relay(mine, timeout=10, limit=0.5)
+        self.assertTrue(cut.startswith('babble cut at '), cut)
+        self.assertGreater(tap.seconds, 0.5)
+        self.assertLess(tap.stop(grace=0), 0)
+
     def test_the_phone_closing_cuts_it_short(self):
         tap = self.tap('hang')
         self.assertTrue(tap.wait_ready())
@@ -850,6 +861,24 @@ class TapPathTests(Isolated):
             self.assertIsNone(speak.tap_path({}))
 
 
+class BabbleLimitTests(unittest.TestCase):
+    def test_short_text_gets_the_margin_long_text_the_factor(self):
+        short = 'Sell the sizzle, not the steak.'
+        expected = speak.reading_seconds(short) - speak.READ_LEAD
+        self.assertAlmostEqual(speak.babble_limit(short), expected + speak.BABBLE_MARGIN)
+        self.assertLess(speak.babble_limit(short), 25.7)               # 2026-10-14 19:12: cut
+        long = ' '.join(['word'] * 250)                                 # about 90 s
+        expected = speak.reading_seconds(long) - speak.READ_LEAD
+        self.assertAlmostEqual(speak.babble_limit(long), expected * speak.BABBLE_FACTOR)
+
+    def test_settings_and_off(self):
+        self.assertAlmostEqual(speak.babble_limit('Hi.', {'babble_factor': 3, 'babble_margin': 1}),
+                               max((speak.reading_seconds('Hi.') - speak.READ_LEAD) * 3,
+                                   speak.reading_seconds('Hi.') - speak.READ_LEAD + 1))
+        self.assertIsNone(speak.babble_limit('Hi.', {'babble_margin': 0}))
+        self.assertIsNotNone(speak.babble_limit('Hi.', {'babble_factor': 'x'}))
+
+
 class FakeTap:
     """Stands in for speak.Tap (calling it "starts" it): `ready`, then `relay`'s answer `cut`,
     the exit `status`, and its `line`."""
@@ -866,8 +895,9 @@ class FakeTap:
     def wait_ready(self):
         return self.ready
 
-    def relay(self, sock, timeout, record=None, copy=None):
+    def relay(self, sock, timeout, record=None, copy=None, limit=None):
         self.record = record
+        self.limit = limit
         self.relayed = sock
         return self.cut
 
@@ -1810,6 +1840,14 @@ class MacVoiceForTheHub(FakeToolCase):
         self.assertFalse(self.hub.header(1)['mac'])
         self.assertNotIn('audio', self.hub.header(1))
         self.assertEqual((self.hub.header(2)['mac'], self.hub.header(2)['audio']), (True, False))
+
+    def test_the_header_names_the_phones_streamed_to(self):
+        speak.voice_clock(self.cfg, 'Hi', mac=True, phones=['iPhone 16 Pro']).close()
+        self.assertTrue(self.hub.wait(1))
+        self.assertEqual(self.hub.header(0)['phones'], ['iPhone 16 Pro'])
+        speak.voice_clock(self.cfg, 'Hi').close()
+        self.assertTrue(self.hub.wait(2))
+        self.assertNotIn('phones', self.hub.header(1))
 
     def test_a_relay_to_no_phone_feeds_the_copy_only(self):
         tap = self.tap('ok')
