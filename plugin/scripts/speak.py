@@ -69,7 +69,12 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
             - no prompt (a response to a notice: she speaks unprompted): every listed phone (the
               app's voice streamed to all at once), and the Mac as output says;
             - a typed prompt: as without phone_route.
-            Every phone needs the same pairing code (phone_token).
+            Every phone needs the same pairing code (phone_token). While the hub runs (its
+            her-voice.sock next to voice-route.json), it also hears of every reading on the Mac's
+            own speakers, as it plays: the stream's copy marked "mac", the app's voice on the Mac
+            alone through app-voice-tap unmuted (the speaker follows it to its end), or a note
+            with no audio while `say` speaks; its phones that would hear the Mac don't listen
+            meanwhile (Sakamoto Eyes P2.8).
   dev_path  for working on the plugin: a checkout's plugin/ folder. The installed (cached) copy then
             runs that checkout's speak.py instead, so edits there take effect with the next
             response, without a plugin update or a restart (changes to hooks.json still need both).
@@ -1047,23 +1052,39 @@ VOICE_CLOCK_SOCKET = 'her-voice.sock'   # next to the hub's voice-route.json (ph
 COPY_MAX = 2 * 2 * STREAM_RATE          # bytes: 2 s of the stream waiting for the hub, at most
 
 
-def voice_clock(cfg, text, rate=STREAM_RATE):
-    """Sakamoto Eyes' hub times the emoji in a reply to the voice reading it, from a copy of the
-    stream the phones get: a Unix socket next to its voice-route.json (phone_route). Returns the
-    connected socket, the header sent ({"text", "rate", "format", "channels"}, a line), or None
-    when there is no hub there. It never holds up the phones: see Tap.relay's `copy`."""
+def hub_socket(cfg):
+    """Sakamoto Eyes' hub's her-voice.sock (next to its voice-route.json, phone_route) when it is
+    there; else None (no hub, or phone_route off)."""
     route = cfg.get('phone_route') or ''
     if not route:
         return None
     path = os.path.join(os.path.dirname(os.path.expanduser(route)), VOICE_CLOCK_SOCKET)
-    if not os.path.exists(path):
+    return path if os.path.exists(path) else None
+
+
+def voice_clock(cfg, text, rate=STREAM_RATE, mac=False, audio=True):
+    """Sakamoto Eyes' hub times the emoji in a reply to the voice reading it, from a copy of the
+    stream the phones get: a Unix socket next to its voice-route.json (phone_route). Returns the
+    connected socket, the header sent ({"text", "rate", "format", "channels", "mac"}, a line), or
+    None when there is no hub there. It never holds up the phones: see Tap.relay's `copy`.
+
+    Sakamoto Eyes P2.8 (2026-10-14 17:59: her voice on the Mac's speakers, heard by the lab's
+    phone, went to her as John's): the hub hears of every reading on the Mac's speakers too, so
+    the phones that would hear them don't listen meanwhile (a phone's echo canceller takes out
+    only what that phone plays). `mac`: her voice plays on the Mac's speakers (app-both, or the
+    app's voice on the Mac alone, tapped unmuted). `audio` False: no audio follows (`say` on the
+    Mac, or no tap): the connection, open while her voice plays, is the whole message."""
+    path = hub_socket(cfg)
+    if not path:
         return None
     sock = None
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(0.5)
         sock.connect(path)
-        header = {'text': text, 'rate': rate, 'format': 'pcm16', 'channels': 1}
+        header = {'text': text, 'rate': rate, 'format': 'pcm16', 'channels': 1, 'mac': bool(mac)}
+        if not audio:
+            header['audio'] = False
         sock.sendall(json.dumps(header, ensure_ascii=False, separators=(',', ':')).encode('utf-8') + b'\n')
         sock.setblocking(False)
         return sock
@@ -1133,7 +1154,8 @@ class Tap:
 
         sock may be a list of sockets (several phones, Sakamoto Eyes' broadcast): a phone that
         ends its stream or fails is taken out of the list (logged), and the stream is cut short
-        only when none is left."""
+        only when none is left. An empty list, with `copy`: no phone, only the hub's copy (the
+        app's voice on the Mac alone; Sakamoto Eyes P2.8)."""
         wav = None
         if record:
             try:
@@ -1154,6 +1176,7 @@ class Tap:
 
     def _relay(self, sock, timeout, wav, copy=None):
         socks = sock if isinstance(sock, list) else [sock]
+        phones = bool(socks)        # False: the hub's copy only
         cut = None
         copy_pending = bytearray()
 
@@ -1182,7 +1205,7 @@ class Tap:
                         drop(s, 'the phone ended the stream (a newer message or Stop)')
                 except OSError as e:
                     drop(s, f'the phone ended the stream ({e})')
-            if not socks:
+            if phones and not socks:
                 return cut
             if out in ready:
                 chunk = os.read(out, 65536)
@@ -1211,7 +1234,7 @@ class Tap:
                         drop(s, f'the phone took no audio for {STREAM_SEND_TIMEOUT:.0f} s')
                     except OSError as e:
                         drop(s, f'sending to the phone failed ({e})')
-                if not socks:
+                if phones and not socks:
                     return cut
                 self.sent += len(chunk)
         if copy and copy_pending:
@@ -1374,7 +1397,7 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
             return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found", 'not-clicked',
                             to=streamed)
         cut = tap.relay(live if len(live) > 1 else live[0], timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30,
-                        record=recording_path(raw), copy=voice_clock(cfg, raw))
+                        record=recording_path(raw), copy=voice_clock(cfg, raw, mac=both))
         status = tap.stop(grace=0 if cut else 3.0)
     except BaseException:
         tap.stop(grace=0)
@@ -1397,6 +1420,78 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
             log(f'app-phone: {tap.seconds:.1f} s to the phone{phones}; app-voice-tap: {tap.last_line()}')
         else:
             log(f'app-phone: app-voice-tap stopped with status {status}: {tap.last_line()}')
+
+
+def app_read_here(cfg, raw, delay=APP_READ_DELAY):
+    """The Claude app reads the response on the Mac alone (output app, or app-both's voice here
+    when the phone gets the text). Returns None when it didn't click (app_read), else a function
+    that follows the reading to its end: call it once whatever should start alongside has
+    started (the text to a phone).
+
+    Under Sakamoto Eyes (its hub's her-voice.sock: P2.8), the hub hears of it, so the phones that
+    would hear the Mac don't listen meanwhile: app-voice-tap, unmuted, sends it a copy of what the
+    Mac plays (its real end is the sound's end); without the tool, a note with no audio, held
+    open for the reading's estimated length. The speaker stays alive while it follows. Without a
+    hub, as before: only the click."""
+    if not hub_socket(cfg):
+        return (lambda: None) if app_read(raw, delay) else None
+    started = time.monotonic()
+    path = tap_path(cfg)
+    tap = None
+    if path:
+        try:
+            tap = Tap(path, mute=False)
+            if not tap.wait_ready():
+                log(f'app (Mac): app-voice-tap did not start: {tap.last_line()}')
+                tap.stop(grace=0)
+                tap = None
+        except OSError as e:
+            log(f'app (Mac): app-voice-tap did not start: {e}')
+            tap = None
+    try:
+        clicked = app_read(raw, delay=max(0.0, delay - (time.monotonic() - started)))
+    except BaseException:
+        if tap:
+            tap.stop(grace=0)
+        raise
+    if not clicked:
+        if tap:
+            tap.stop(grace=0)
+        return None
+    if not tap:
+        note = voice_clock(cfg, raw, mac=True, audio=False)
+
+        def follow_note():
+            if note:
+                time.sleep(max(0.0, reading_seconds(raw) - READ_LEAD))
+                note.close()
+        return follow_note
+
+    def follow():
+        try:
+            cut = tap.relay([], timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30, record=recording_path(raw),
+                            copy=voice_clock(cfg, raw, mac=True))
+            status = tap.stop(grace=0 if cut else 3.0)
+        except BaseException:
+            tap.stop(grace=0)
+            raise
+        log(f'app (Mac): {tap.seconds:.1f} s for the hub'
+            + (f' ({cut})' if cut else '' if status == 0 else f'; app-voice-tap status {status}')
+            + f'; app-voice-tap: {tap.last_line()}')
+    return follow
+
+
+def mac_says(cfg, raw, chunks, voices):
+    """The Mac's own voices speak the chunks (`say`); under Sakamoto Eyes the hub hears of it
+    for as long as they speak (a note with no audio, P2.8), so the phones that would hear the
+    Mac don't listen meanwhile."""
+    note = voice_clock(cfg, raw, mac=True, audio=False)
+    try:
+        for lang, chunk in chunks:
+            subprocess.run(say_command(cfg, voices, lang) + [chunk])
+    finally:
+        if note:
+            note.close()
 
 
 def installed_voices():
@@ -1443,8 +1538,10 @@ def speak(path, prompted=True, turn=None):
         # After a notice the response may share a block with the one before; app-read presses the
         # button only when this response starts its block, so the app's voice is still tried.
         log('app: a response without a new prompt; the app reads it only if it starts its block')
+    follow = None       # the app's voice on the Mac alone, followed to its end (app_read_here)
     if output == 'app':
-        output = None if app_read(raw, APP_READ_DELAY) else 'mac'   # the app's own voice, else the Mac's
+        follow = app_read_here(cfg, raw)
+        output = None if follow else 'mac'   # the app's own voice, else the Mac's
     elif output == 'app-both':
         # The app's voice here and streamed to the phone; failing that, as much of it as can be had.
         if cfg.get('phone_voice') == 'text':
@@ -1453,7 +1550,8 @@ def speak(path, prompted=True, turn=None):
         else:
             stage = app_phone(cfg, raw, text, phone_runs, chunks, voices, both=True) if chunks else 'before-click'
         if stage == 'before-click':     # the app's voice here, the text to the phone
-            output = 'phone' if app_read(raw, APP_READ_DELAY) else 'both'
+            follow = app_read_here(cfg, raw)
+            output = 'phone' if follow else 'both'
         else:                           # the app didn't speak: the Mac's voices and the text
             output = 'both' if stage else None
     elif output == 'app-phone':
@@ -1468,9 +1566,10 @@ def speak(path, prompted=True, turn=None):
         # Alongside the Mac's own speech, so both start together.
         phone = threading.Thread(target=deliver_to_phone, args=(cfg, text, phone_runs, chunks, voices))
         phone.start()
-    if output in ('mac', 'both'):
-        for lang, chunk in chunks:
-            subprocess.run(say_command(cfg, voices, lang) + [chunk])
+    if output in ('mac', 'both') and chunks:
+        mac_says(cfg, raw, chunks, voices)
+    if follow:
+        follow()
     if phone:
         phone.join()
     try:

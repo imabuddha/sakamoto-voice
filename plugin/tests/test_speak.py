@@ -5,7 +5,7 @@
 The settings, the pid file, and the log go to a temporary folder, never ~/.config. The tests
 with a stand-in phone use the loopback interface and are skipped where they can't listen.
 """
-import base64, io, json, os, socket, sys, tempfile, threading, unittest, wave
+import base64, io, json, os, socket, sys, tempfile, threading, time, unittest, wave
 from contextlib import redirect_stdout
 from unittest import mock
 
@@ -1742,3 +1742,161 @@ class VoiceRace(Isolated):
         self.assertEqual(shifted, 1)                     # exact, after a letter
         self.assertEqual(too_far, -1)                    # more than 24 others among them
         self.assertEqual(no_key, 0)
+
+
+class HubListener:
+    """A stand-in for Sakamoto Eyes' hub's her-voice.sock: keeps each connection's bytes, whole."""
+
+    def __init__(self, folder):
+        self.path = os.path.join(folder, speak.VOICE_CLOCK_SOCKET)
+        self.route = os.path.join(folder, 'voice-route.json')
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(self.path)
+        self.server.listen(4)
+        self.received = []
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                client, _ = self.server.accept()
+            except OSError:
+                return
+            data = bytearray()
+            with client:
+                while chunk := client.recv(65536):
+                    data.extend(chunk)
+            self.received.append(bytes(data))
+
+    def header(self, index=0):
+        return json.loads(self.received[index].split(b'\n', 1)[0])
+
+    def audio(self, index=0):
+        return self.received[index].split(b'\n', 1)[1]
+
+    def wait(self, count, timeout=5):
+        end = time.monotonic() + timeout
+        while len(self.received) < count and time.monotonic() < end:
+            time.sleep(0.01)
+        return len(self.received) >= count
+
+    def close(self):
+        self.server.close()
+
+
+class MacVoiceForTheHub(FakeToolCase):
+    """Sakamoto Eyes P2.8: the hub hears of every reading on the Mac's own speakers."""
+
+    def setUp(self):
+        super().setUp()
+        try:
+            self.hub = HubListener(self.dir.name)
+        except OSError as e:
+            self.skipTest(f'cannot listen on a Unix socket here: {e}')
+        self.addCleanup(self.hub.close)
+        self.cfg = dict(speak.DEFAULTS, phone_route=self.hub.route)
+
+    def test_no_hub_no_socket(self):
+        self.assertIsNone(speak.hub_socket(dict(speak.DEFAULTS)))
+        self.assertIsNone(speak.voice_clock(dict(speak.DEFAULTS), 'Hi', mac=True))
+        self.assertEqual(speak.hub_socket(self.cfg), self.hub.path)
+
+    def test_the_header_says_where_her_voice_plays(self):
+        for count, kwargs in enumerate(({'mac': True}, {}, {'mac': True, 'audio': False}), start=1):
+            speak.voice_clock(self.cfg, 'Hi', **kwargs).close()
+            self.assertTrue(self.hub.wait(count))
+        self.assertEqual(self.hub.header(0), {'text': 'Hi', 'rate': speak.STREAM_RATE, 'format': 'pcm16',
+                                              'channels': 1, 'mac': True})
+        self.assertFalse(self.hub.header(1)['mac'])
+        self.assertNotIn('audio', self.hub.header(1))
+        self.assertEqual((self.hub.header(2)['mac'], self.hub.header(2)['audio']), (True, False))
+
+    def test_a_relay_to_no_phone_feeds_the_copy_only(self):
+        tap = self.tap('ok')
+        self.assertTrue(tap.wait_ready())
+        self.assertIsNone(tap.relay([], timeout=10, copy=speak.voice_clock(self.cfg, 'Hi', mac=True)))
+        self.assertEqual(tap.stop(), 0)
+        self.assertTrue(self.hub.wait(1))
+        self.assertEqual(self.hub.audio(), AUDIO)
+        self.assertAlmostEqual(tap.seconds, len(AUDIO) / 48000)
+
+    def test_the_apps_voice_on_the_mac_alone_is_tapped_unmuted_for_the_hub(self):
+        with self.mode('ok'), mock.patch.object(speak, 'tap_path', return_value=self.tool), \
+             mock.patch.object(speak, 'app_read', return_value=True) as click:
+            follow = speak.app_read_here(self.cfg, 'Hello there')
+            self.assertIsNotNone(follow)
+            follow()
+        click.assert_called_once()
+        self.assertNotIn('--mute', self.read('args').split('\n'))        # the Mac plays it
+        self.assertTrue(self.hub.wait(1))
+        self.assertEqual(self.hub.header(), {'text': 'Hello there', 'rate': speak.STREAM_RATE, 'format': 'pcm16',
+                                             'channels': 1, 'mac': True})
+        self.assertEqual(self.hub.audio(), AUDIO)
+        self.assertIn('app (Mac): 1.0 s for the hub', self.log_text())
+
+    def test_not_clicked_follows_nothing(self):
+        with self.mode('hang'), mock.patch.object(speak, 'tap_path', return_value=self.tool), \
+             mock.patch.object(speak, 'app_read', return_value=False):
+            self.assertIsNone(speak.app_read_here(self.cfg, 'Hello'))
+        time.sleep(0.1)
+        self.assertEqual(self.hub.received, [])
+
+    def test_without_the_tool_a_note_for_the_estimated_length(self):
+        with mock.patch.object(speak, 'tap_path', return_value=None), \
+             mock.patch.object(speak, 'app_read', return_value=True), \
+             mock.patch.object(speak, 'reading_seconds', return_value=speak.READ_LEAD + 0.2):
+            speak.app_read_here(self.cfg, 'Hello')()
+        self.assertTrue(self.hub.wait(1))
+        self.assertEqual((self.hub.header()['mac'], self.hub.header()['audio']), (True, False))
+        self.assertEqual(self.hub.audio(), b'')
+
+    def test_without_a_hub_only_the_click(self):
+        with mock.patch.object(speak, 'tap_path') as tap_path, \
+             mock.patch.object(speak, 'app_read', return_value=True):
+            speak.app_read_here(dict(speak.DEFAULTS), 'Hello')()
+        tap_path.assert_not_called()
+        with mock.patch.object(speak, 'app_read', return_value=False):
+            self.assertIsNone(speak.app_read_here(dict(speak.DEFAULTS), 'Hello'))
+
+    def test_say_on_the_mac_is_a_note_while_it_speaks(self):
+        self.write_config(dict(self.cfg, output='mac', default_lang='en'))
+        fd, path = tempfile.mkstemp(dir=self.dir.name)
+        with os.fdopen(fd, 'w') as f:
+            f.write('Hello there')
+        spoke = []
+
+        def say(argv, **kwargs):
+            spoke.append((argv[-1], len(self.hub.received)))       # the note is still open
+        with mock.patch.object(speak, 'installed_voices', return_value=set()), \
+             mock.patch.object(speak.subprocess, 'run', side_effect=say):
+            speak.speak(path)
+        self.assertTrue(self.hub.wait(1))
+        self.assertEqual(spoke, [('Hello there', 0)])
+        self.assertEqual(self.hub.header(), {'text': 'Hello there', 'rate': speak.STREAM_RATE, 'format': 'pcm16',
+                                             'channels': 1, 'mac': True, 'audio': False})
+
+    def test_app_both_tells_the_hub_the_mac_plays(self):
+        with mock.patch.object(speak, 'tap_path', return_value='/bin/app-voice-tap'), \
+             mock.patch.object(speak, 'Tap', FakeTap()), \
+             mock.patch.object(speak, 'reach_phone', return_value=(mock.Mock(), {'ok': True})), \
+             mock.patch.object(speak, 'open_stream'), mock.patch.object(speak, 'end_stream'), \
+             mock.patch.object(speak, 'app_read', return_value=True), \
+             mock.patch.object(speak, 'voice_clock', return_value=None) as clock:
+            cfg = dict(self.cfg, output='app-both', phone_token='123456')
+            self.write_config(cfg)
+            speak.app_phone(cfg, 'Hi', 'Hi', [('default', 'Hi')], [('en', 'Hi')], set(), both=True)
+            speak.app_phone(cfg, 'Hi', 'Hi', [('default', 'Hi')], [('en', 'Hi')], set())
+        self.assertEqual([c.kwargs.get('mac') for c in clock.call_args_list], [True, False])
+
+    def test_app_output_follows_the_reading_after_the_click(self):
+        order = []
+        self.write_config(dict(self.cfg, output='app', default_lang='en'))
+        fd, path = tempfile.mkstemp(dir=self.dir.name)
+        with os.fdopen(fd, 'w') as f:
+            f.write('Hello')
+        with mock.patch.object(speak, 'installed_voices', return_value=set()), \
+             mock.patch.object(speak.subprocess, 'run') as run, \
+             mock.patch.object(speak, 'app_read_here', return_value=lambda: order.append('followed')):
+            speak.speak(path)
+        run.assert_not_called()
+        self.assertEqual(order, ['followed'])
