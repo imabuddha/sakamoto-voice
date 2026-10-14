@@ -889,10 +889,15 @@ def launch(text, prompted=True, turn=None):
 
 def read_key(text, length=40):
     """The start of a response as app-read.mjs looks for it on the page: its letters and digits,
-    lowercased, with what the page doesn't show as text (link and image addresses) left out."""
+    lowercased, with what the page doesn't show as text (link and image addresses) left out, and
+    its fenced code blocks, which app-read.mjs leaves out of the page's text too (their code, label,
+    and Copy button; 2026-10-14 14:35: a reply with a code block wasn't found). A reply that is
+    only code keeps it."""
     text = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', text)
     text = re.sub(r'\]\([^)]*\)', ']', text)
-    return ''.join(c for c in text.lower() if c.isalnum())[:length]
+    prose = re.sub(r'(?ms)^[ \t]*(```|~~~).*?(^[ \t]*\1[ \t]*$|\Z)', ' ', text)
+    key = ''.join(c for c in prose.lower() if c.isalnum())[:length]
+    return key or ''.join(c for c in text.lower() if c.isalnum())[:length]
 
 
 READ_WORDS_PER_SECOND = 2.75    # the Claude app's English voice, about 165 words a minute
@@ -922,9 +927,17 @@ def note_app_reading(text, now=None):
         log(f'app-reading: {e}')
 
 
+APP_READ_WAIT = 8.0       # seconds app-read.mjs looks for the response's button
+APP_READ_RETRY = 6.0      # then, when no message matched, this long again (the page may still be drawing)
+APP_READ_AGAIN = ('no matching message', 'no Read aloud button')
+
+
 def app_read(text, delay=0.5):
     """Presses Read aloud on this response (the raw text) in the Claude app; True when it clicked.
-    app-read.mjs waits for the page to draw the response's button, so the delay is only a head start."""
+    app-read.mjs waits for the page to draw the response's button, so the delay is only a head start.
+    When it found no matching message (or no button at all) in its APP_READ_WAIT, it looks again for
+    APP_READ_RETRY before giving up (2026-10-14 06:25: after a tool-heavy turn, the reply's message
+    wasn't there yet, and the phone's own voice read it)."""
     time.sleep(delay)
     node = shutil.which('node') or next((p for p in ('/opt/homebrew/bin/node', '/usr/local/bin/node')
                                           if os.path.exists(p)), None)
@@ -932,16 +945,22 @@ def app_read(text, delay=0.5):
         log('app: node not found')
         return False
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app-read.mjs')
-    try:
-        result = subprocess.run([node, script, '9229', read_key(text)], capture_output=True, text=True,
-                                timeout=20)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        log(f'app: {e}')
-        return False
-    log(f'app: {(result.stdout or result.stderr).strip()[:200]} ({read_key(text, 24)})')
-    if result.returncode == 0:
-        note_app_reading(text)
-    return result.returncode == 0
+    for wait in (APP_READ_WAIT, APP_READ_RETRY):
+        try:
+            result = subprocess.run([node, script, '9229', read_key(text), str(int(wait * 1000))], capture_output=True,
+                                    text=True, timeout=wait + 12)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log(f'app: {e}')
+            return False
+        said = (result.stdout or result.stderr).strip()
+        log(f'app: {said[:200]} ({read_key(text, 24)})')
+        if result.returncode == 0:
+            note_app_reading(text)
+            return True
+        if not said.startswith(APP_READ_AGAIN) or wait == APP_READ_RETRY:
+            return False
+        log(f'app: looking again for {APP_READ_RETRY:g} s')
+    return False
 
 
 # ---- The Claude app's voice on the phone (output app-phone) ---------------------------------
@@ -958,7 +977,8 @@ def app_read(text, delay=0.5):
 # exits, once the app has been quiet for a moment (status 6: no sound came); then close.
 
 APP_READ_DELAY = 0.5      # seconds from the Stop hook to looking for Read aloud (app-read.mjs waits for it)
-TAP_WAIT_START = 10       # seconds the tap waits for the app's voice after "ready"
+TAP_WAIT_START = 20       # seconds the tap waits for the app's voice after "ready" (app_read may look
+                          # for the button APP_READ_WAIT + APP_READ_RETRY, and the voice takes READ_LEAD)
 TAP_MAX_SECONDS = 900     # the longest reading streamed (max_chars of 6000 is about 7 minutes)
 TAP_READY_TIMEOUT = 8     # seconds to start the tap
 TAP_NO_SOUND = 6          # app-voice-tap's exit status when no sound came

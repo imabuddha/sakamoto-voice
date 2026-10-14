@@ -1670,3 +1670,75 @@ class Notices(unittest.TestCase):
         self.assertTrue(speak.is_notice('  <system-reminder>hi'))
         self.assertFalse(speak.is_notice('Okay, try it now.'))
         self.assertFalse(speak.is_notice('I love <b>tags</b>'))
+
+
+class VoiceRace(Isolated):
+    """2026-10-14 06:25 and 14:35: "app: no matching message; the newest holds …", then the phone's
+    own voice, after a tool-heavy turn and for a reply with a code block. app_read looks again for
+    a few seconds, and the key and the page's text both leave code blocks out."""
+
+    def run_app_read(self, outputs, text='14:35 Here it is.'):
+        results = [mock.Mock(returncode=0 if out.startswith('clicked') else 1, stdout=out, stderr='') for out in outputs]
+        with mock.patch.object(speak.shutil, 'which', return_value='/usr/local/bin/node'), \
+             mock.patch.object(speak.subprocess, 'run', side_effect=results) as run:
+            return speak.app_read(text, delay=0), run
+
+    def test_it_looks_again_when_no_message_matched(self):
+        clicked, run = self.run_app_read(['no matching message; the newest holds 300 chars: shprivatetmp',
+                                          'clicked (at 0 of 20)'])
+        self.assertTrue(clicked)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0][-1], str(int(speak.APP_READ_WAIT * 1000)))
+        self.assertEqual(run.call_args_list[1].args[0][-1], str(int(speak.APP_READ_RETRY * 1000)))
+        self.assertTrue(os.path.exists(speak.APP_READING))
+        with open(speak.LOG, encoding='utf-8') as f:
+            self.assertIn('app: looking again for 6 s', f.read())
+
+    def test_once_more_at_most(self):
+        clicked, run = self.run_app_read(['no Read aloud button', 'no matching message; the newest holds 0 chars: '])
+        self.assertFalse(clicked)
+        self.assertEqual(run.call_count, 2)
+
+    def test_not_for_other_reasons(self):
+        for why in ('debugger not reachable (ECONNREFUSED)', 'earlier text first (40 chars before this reply: x)',
+                    'already read'):
+            clicked, run = self.run_app_read([why])
+            self.assertFalse(clicked)
+            self.assertEqual(run.call_count, 1, why)
+
+    def test_the_tap_waits_for_both_looks(self):
+        self.assertGreaterEqual(speak.TAP_WAIT_START,
+                                speak.APP_READ_DELAY + speak.APP_READ_WAIT + speak.APP_READ_RETRY + speak.READ_LEAD)
+
+    def test_the_key_leaves_code_blocks_out(self):
+        reply = '14:35 Run this:\n\n```bash\nswift test -j 6\n```\n\nand tell me what it says.'
+        self.assertEqual(speak.read_key(reply), '1435runthisandtellmewhatitsays')
+        # Only code: the code is the key.
+        self.assertEqual(speak.read_key('```\nls -la\n```'), 'lsla')
+        # An unclosed block runs to the end.
+        self.assertEqual(speak.read_key('Here:\n```\nlet x = 1'), 'here')
+
+    def test_the_page_match(self):
+        """app-read-match.mjs, through node (skipped without it)."""
+        import shutil
+        import subprocess
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node not found')
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'app-read-match.mjs')
+        code = (f'import {{ norm, messageText, findKey }} from {json.dumps(os.path.abspath(here))};\n'
+                'const page = "Claude responded 14:35 Run this: bash Copy swift test -j 6 and tell me what it says.";\n'
+                'const text = messageText(page, ["swift test -j 6"]);\n'
+                'const key = "1435runthisandtellmewhatitsays";\n'
+                'console.log(JSON.stringify([text, findKey(text, key), findKey(norm("1435 Run this and tell me"), key),\n'
+                '  findKey("x" + key, key), findKey("1435runthis" + "y".repeat(30) + "andtellmewhatitsays", key),\n'
+                '  findKey("anything", "")]));\n')
+        out = subprocess.run([node, '--input-type=module', '-e', code], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        text, found, partial, shifted, too_far, no_key = json.loads(out.stdout)
+        self.assertEqual(text, 'clauderesponded1435runthisbashcopyandtellmewhatitsays')
+        self.assertEqual(found, len('clauderesponded'))   # "bash" and "copy" among the key's letters
+        self.assertEqual(partial, -1)                    # the key's end isn't there
+        self.assertEqual(shifted, 1)                     # exact, after a letter
+        self.assertEqual(too_far, -1)                    # more than 24 others among them
+        self.assertEqual(no_key, 0)

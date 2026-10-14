@@ -1,23 +1,30 @@
 // Presses "Read aloud" on a response in the Claude desktop app, so it speaks in its own voice. It
 // needs the app's Developer menu → Enable Main Process Debugger (a Node inspector on
 // 127.0.0.1:9229, off again after the app restarts). Prints "clicked", or why not; exit status 0
-// only when it clicked. Usage: node app-read.mjs [port] [key]
+// only when it clicked. Usage: node app-read.mjs [port] [key] [wait_ms]
 //
 // key: the response's letters and digits, lowercased (speak.py's read_key): only the button of the
 // message whose text contains it is pressed, so an earlier response is never read by mistake. The
 // page may not have drawn the new response's button yet, so it looks again every half second for up
-// to WAIT_MS. A pressed button is marked and never pressed again. Without a key, the last unmarked
-// button is pressed.
+// to wait_ms (WAIT_MS by default; speak.py looks again for a few seconds more when the first look
+// found no matching message). A pressed button is marked and never pressed again. Without a key, the
+// last unmarked button is pressed.
+//
+// A message's text is matched without its code blocks, and the key may have a few other letters
+// among its own (a code block's label and Copy button): app-read-match.mjs.
+import { norm, messageText, findKey } from './app-read-match.mjs';
+
 const port = process.argv[2] || '9229';
 const key = process.argv[3] || '';
-const WAIT_MS = 8000;
+const WAIT_MS = Number(process.argv[4]) > 0 ? Number(process.argv[4]) : 8000;
 const EARLIER_TEXT = 12;    // letters and digits allowed before the reply (a label at most, not a message)
+const matchCode = `const norm = ${norm}; const messageText = ${messageText}; const findKey = ${findKey};`;
 
 // Runs in the page: finds the button (newest first, among the last few), or says why not.
 const inPage = `(async () => {
   const key = ${JSON.stringify(key)};
   const EARLIER_TEXT = ${EARLIER_TEXT};
-  const norm = (s) => s.toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+  ${matchCode}
   const label = 'button[aria-label="Read aloud"]';
   // The message a button belongs to: its largest ancestor holding no other Read aloud button.
   const messageOf = (button) => {
@@ -32,8 +39,11 @@ const inPage = `(async () => {
     for (const button of buttons) {
       // The mark names what was read: the app may reuse a button for a newer message.
       // The app may head a block with a label ("Claude responded"), which isn't earlier text.
-      const text = norm(messageOf(button).innerText || '').replace(/^clauderesponded/, '');
-      if (key && !text.includes(key)) {
+      const message = messageOf(button);
+      const text = messageText(message.innerText || '', [...message.querySelectorAll('pre')].map((p) => p.innerText || ''))
+        .replace(/^clauderesponded/, '');
+      const at = findKey(text, key);
+      if (at < 0) {
         // For the log: the start and length of what the newest button's message holds.
         if (button === buttons[0]) {
           why = 'no matching message; the newest holds ' + text.length + ' chars: ' + text.slice(0, 40);
@@ -46,7 +56,6 @@ const inPage = `(async () => {
       // The button reads its whole block. When this reply comes well after the block's start, the
       // block also holds earlier text (a turn that followed a notice, not a new message), which the
       // app would read again first: don't press; the Mac's or the phone's voices read the reply.
-      const at = key ? text.indexOf(key) : 0;
       // A turn the user wrote into while it ran heads its block with a label that repeats the
       // reply's first sentence ("Claude responded: 08:18 Thanks, …"): not earlier text either.
       const repeatsReply = at > 0 && key.startsWith(text.slice(0, at));

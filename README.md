@@ -460,8 +460,10 @@ the Claude Code plugin API. The one way in is the app's own debugging feature: w
 Troubleshooting → Enable Developer Mode), a Node inspector listens on `127.0.0.1:9229`, and
 `plugin/scripts/app-read.mjs` asks the app, through it, to click the Read aloud button of the
 response that just finished, on the focused Code session's page. It finds that response by its
-opening text (letters and digits only, so formatting doesn't matter), waits up to 8 s for the page
-to draw its button, and marks each button it presses, so an earlier response is never read by
+opening text (letters and digits only, so formatting doesn't matter; code blocks left out on both
+sides, and a few other letters, such as a code block's label, allowed among the key's), waits up to
+8 s for the page to draw its button, and 6 s more when no message matched (a tool-heavy turn's page
+may still be drawing), and marks each button it presses, so an earlier response is never read by
 mistake. A button reads its whole block, and a reply that follows a notice rather than a new
 message can share a block with the reply before it; when the response starts well into its block,
 the button isn't pressed, and the Mac's or the phone's voices read just the new response. That
@@ -520,7 +522,8 @@ stream and sends the audio, and the tool needs no network permission at all.
 Whenever the voice can't start, the phone gets the response as **text** instead and reads it in
 its own voices, so you always hear something: when the app's debugger is off or the click fails,
 when `app-voice-tap` isn't built or can't start (the permission is off, say), when the phone's app
-is older than 0.3.0 (it doesn't answer a stream), or when no sound comes from the app within 10 s.
+is older than 0.3.0 (it doesn't answer a stream), or when no sound comes from the app within 20 s
+(enough for both looks for the Read aloud button).
 When the phone can't be reached at all, or refuses the pairing code, nothing is read aloud (the
 Mac stays silent). A phone that stops taking audio for 5 s is given up on. `speak.log` says what
 happened, each time.
