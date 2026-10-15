@@ -1682,6 +1682,13 @@ def main():
             touch(PROMPTED)
             if prompt:
                 note_prompt(prompt)     # a 👂 line or typed, for where the reply goes (phone_route)
+            if heard_rooms(prompt):
+                # A 👂 line from Sakamoto Eyes. Its hub silences her itself when you talk over her
+                # (barge-in, 'hush') and holds lines while her voice plays, so a heard line that
+                # arrives here was queued while she was still writing: stopping now would kill the
+                # reading of the reply it followed before it starts (2026-10-16).
+                log('prompt: a heard line; the hub handles barge-in, the voice carries on')
+                return 0
             stop_speaker()
             stop_phone(cfg)
         elif cmd == 'hush':
