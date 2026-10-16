@@ -64,8 +64,11 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
               "app-phone"), so that phone's echo canceller can take her voice out of what it
               hears. When the Claude app's voice can't be streamed there, the phone's "fallback"
               decides: "stream_only" (the phone by the Mac, its back camera): nothing is heard;
-              "any" (the phone held facing you): the text in the phone's own voices. A route older
-              than 30 minutes, or naming no address, changes nothing;
+              "any" (the phone held facing you): the text in the phone's own voices. A route to
+              the Mac ("mac": true, the Mac app's room: the line came from the Mac app, or no
+              phone there plays her voice): only the Mac, as the output's Mac side ("app-phone"
+              and "app-both" play as "app", "phone" and "both" as "mac"), never a phone. A route
+              older than 30 minutes, or naming neither an address nor the Mac, changes nothing;
             - no prompt (a response to a notice: she speaks unprompted): every listed phone (the
               app's voice streamed to all at once), and the Mac as output says;
             - a typed prompt: as without phone_route.
@@ -157,6 +160,8 @@ def remember(**changes):
 
 ROUTE_MAX_AGE = 30 * 60      # seconds: an older voice route is ignored
 ROUTED_OUTPUTS = {'both': 'phone', 'app-both': 'app-phone'}   # the Mac stays quiet under a route
+# A route to the Mac's speakers ("mac": the Mac app's room): each output's Mac side, no phone.
+MAC_OUTPUTS = {'app': 'app', 'app-both': 'app', 'app-phone': 'app', 'mac': 'mac', 'both': 'mac', 'phone': 'mac'}
 
 
 def addresses_of(entry):
@@ -179,15 +184,16 @@ def route_file(cfg):
 
 def voice_route(cfg, now=None):
     """Sakamoto Eyes' voice route (phone_route, its hub's voice-route.json: {"room", "phone",
-    "addresses", "fallback", "at_unix", "phones", …}), or None when there is none, it is older
-    than ROUTE_MAX_AGE, names no address, or can't be read."""
+    "addresses", "fallback", "mac", "at_unix", "phones", …}), or None when there is none, it is
+    older than ROUTE_MAX_AGE, names neither an address nor the Mac ("mac": true), or can't be
+    read."""
     route = route_file(cfg)
     try:
         age = (now or time.time()) - float(route.get('at_unix', 0))
     except (TypeError, ValueError):
         return None
     addresses = addresses_of(route)
-    if not addresses or not 0 <= age <= ROUTE_MAX_AGE:
+    if not (addresses or route.get('mac') is True) or not 0 <= age <= ROUTE_MAX_AGE:
         return None
     return dict(route, addresses=addresses)
 
@@ -251,7 +257,9 @@ def routed(cfg, turn='heard'):
       room), and the Mac stays quiet ("both" as "phone", "app-both" as
       "app-phone"). When the app's voice can't be streamed there, the phone's own choice (its
       `fallback`): "stream_only" (silence) or "any" (the text in its voices; also
-      when it doesn't say).
+      when it doesn't say). A route to the Mac ("mac": the line came from the Mac app's room):
+      only the Mac, as the output's Mac side (MAC_OUTPUTS: "app-phone" as "app", "both" as
+      "mac"), with no phone (`on_mac`).
     - 'notice' (she speaks unprompted), with phones listed: every one of them (`targets`), and
       the Mac as `output` says.
     - 'typed', or no route or list: unchanged."""
@@ -259,6 +267,8 @@ def routed(cfg, turn='heard'):
         route = voice_route(cfg)
         if not route:
             return cfg
+        if route.get('mac') is True:
+            return dict(cfg, output=MAC_OUTPUTS.get(cfg.get('output'), 'mac'), on_mac=True)
         target = {'name': route.get('phone') or route.get('room') or 'the routed phone',
                   'addresses': route['addresses'], 'fallback': route.get('fallback') or 'any'}
         return dict(cfg, output=ROUTED_OUTPUTS.get(cfg.get('output'), cfg.get('output')), targets=[target])
@@ -1562,6 +1572,8 @@ def speak(path, prompted=True, turn=None):
     cfg = routed(config(), turn)
     if cfg.get('targets') and cfg.get('output') in PHONE_OUTPUTS:
         log(f'voice route ({turn}): ' + ', '.join(map(target_name, cfg['targets'])))
+    elif cfg.get('on_mac'):
+        log(f'voice route ({turn}): the Mac ({cfg["output"]})')
     voices = installed_voices()
     limit = int(cfg.get('max_chars') or 0)
     if limit and len(text) > limit:

@@ -1338,6 +1338,53 @@ class VoiceRoute(SpeakerTests):
             self.assertEqual(speak.route_addresses(cfg), [])
             self.assertEqual(speak.routed(cfg, 'heard'), cfg)
 
+    def write_mac_route(self, age=10, phones=None):
+        """The hub's route to the Mac's speakers: the Mac app's room, no phone and no address."""
+        path = os.path.join(self.dir.name, 'voice-route.json')
+        with open(path, 'w') as f:
+            json.dump({'room': 'Lab', 'addresses': [], 'mac': True, 'at_unix': speak.time.time() - age,
+                       'phones': [self.DEN] if phones is None else phones}, f)
+        return path
+
+    def test_a_route_to_the_mac_plays_there_only(self):
+        # John, 2026-10-17 07:49: he talked to her through the Mac app in the Lab, and with no
+        # address in the route her voice went to the configured phone, the 16 Pro in Nerdvana.
+        route = self.write_mac_route()
+        for output, expected in (('app-phone', 'app'), ('app-both', 'app'), ('app', 'app'),
+                                 ('phone', 'mac'), ('both', 'mac'), ('mac', 'mac'), ('radio', 'mac')):
+            cfg = speak.routed({'phone_token': '123456', 'phone_route': route, 'output': output}, 'heard')
+            self.assertEqual(cfg['output'], expected, output)
+            self.assertNotIn('targets', cfg)
+        self.assertEqual(speak.route_addresses({'phone_route': route}), [])
+        self.assertTrue(speak.voice_route({'phone_route': route})['mac'])
+
+    def test_on_the_mac_the_phones_get_nothing(self):
+        route = self.write_mac_route()
+        run, deliver = self.run_speaker({'output': 'both', 'default_lang': 'en', 'phone_token': '123456',
+                                         'phone': 'Example-iPhone.local:47811', 'phone_route': route}, turn='heard')
+        self.assertEqual(self.spoken(run), ['Hello', '囲碁'])
+        deliver.assert_not_called()
+        self.assertIn('voice route (heard): the Mac (mac)', self.log_text())
+        with mock.patch.object(speak, 'app_phone') as app_phone, \
+             mock.patch.object(speak, 'app_read_here', return_value=lambda: None) as here:
+            run, deliver = self.run_speaker({'output': 'app-phone', 'default_lang': 'en', 'phone_token': '123456',
+                                             'phone_route': route}, turn='heard')
+        here.assert_called_once()
+        app_phone.assert_not_called()
+        deliver.assert_not_called()
+        run.assert_not_called()
+
+    def test_a_stale_route_to_the_mac_changes_nothing(self):
+        route = self.write_mac_route(age=31 * 60)
+        cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-phone'}
+        self.assertEqual(speak.routed(cfg, 'heard'), cfg)
+
+    def test_a_route_to_the_mac_leaves_typed_and_unprompted_replies_as_they_were(self):
+        route = self.write_mac_route()
+        cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-both'}
+        self.assertEqual(speak.routed(cfg, 'typed'), cfg)
+        self.assertEqual([t['name'] for t in speak.routed(cfg, 'notice')['targets']], ['16 Pro'])
+
     def test_a_reply_to_a_typed_prompt_is_as_before(self):
         route = self.write_route(['192.168.1.40:47811'], phones=[self.LAB, self.DEN])
         cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-both'}
