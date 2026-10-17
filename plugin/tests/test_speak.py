@@ -1237,13 +1237,24 @@ class NothingToSay(unittest.TestCase):
                      '08:31 👩🏻‍🔬', '🫖', '08:31 🎉 🤔', '08:31 🧜🏻‍♀️🕵🏻‍♀️🇯🇵',
                      # Sakamoto Eyes' avatar escapes: become a mermaid, come back, think of herself.
                      '09:06 👩🏻‍🔬🧜🏻‍♀️', '09:06 👩🏻‍🔬🧜🏻‍♀️🎉🤔', '09:06 👩🏻‍🔬👩🏻‍🔬', '09:06 👩🏻‍🔬👩🏻‍🔬👩🏻‍🔬',
-                     # John, 2026-10-17 15:35: her time sign-off alone makes no sound, in any mode.
-                     '08:31', ' 8:31\n', '13:40 '):
+                     # 2026-10-17, the skeptic: her time after the emoji, its own last line or not.
+                     '👍\n13:40', '😊 13:40', '👍\n\n13:40\n', '…\n13:40'):
             self.assertTrue(speak.nothing_to_say(text), text)
+
+    def test_her_time_sign_off_alone_is_nothing_to_say(self):
+        # John, 2026-10-17 15:35: it makes no sound, in any mode. Her sign-off is the minute she
+        # replied in (or up to two before); any other bare time is an answer, and is spoken.
+        now = time.mktime((2026, 10, 17, 13, 40, 20, 0, 0, -1))
+        for text in ('13:40', ' 13:40\n', '13:39 ', '13:38'):
+            self.assertTrue(speak.nothing_to_say(text, now), text)
+        for text in ('8:30', '13:37', '13:41', '08:31'):
+            self.assertFalse(speak.nothing_to_say(text, now), text)
+        self.assertTrue(speak.nothing_to_say(time.strftime('%H:%M')))     # this minute, by default
 
     def test_anything_more_is_spoken(self):
         for text in ('08:31 … hello', '08:31 Bumble', 'Wait…', '08:31 🦉 owl', '08:31 ★☆★☆', '08:31:15',
-                     '08:31 🎉🤔👍🦉', '09:06 👩🏻‍🔬🧜🏻‍♀️🎉🤔👍'):
+                     '08:31 🎉🤔👍🦉', '09:06 👩🏻‍🔬🧜🏻‍♀️🎉🤔👍', 'Yes.\n13:40', '8 minutes', 'Yes. 13:40',
+                     '👍 Done.\n13:40'):
             self.assertFalse(speak.nothing_to_say(text), text)
 
 if __name__ == '__main__':
@@ -1622,7 +1633,7 @@ class VoiceRules(SpeakerTests):
     MAC_APP = {'name': 'Mac', 'room': 'Labmac', 'addresses': ['127.0.0.1:47823'], 'fallback': 'any'}
 
     def write_hub(self, route=None, level='normal', levels=None, mac_silent=False, phones=None, age=10,
-                  status_age=2, commands=True):
+                  status_age=2, commands=True, mac_rooms=None, his_room=None):
         """The hub's state folder: voice-route.json (the route, if any, `age` seconds old; the
         levels; the phones, each marked silent when its room is), status.json written
         `status_age` seconds ago (None: none), and an empty commands.jsonl."""
@@ -1631,6 +1642,10 @@ class VoiceRules(SpeakerTests):
         levels = levels or {}
         silent = lambda room: levels.get(room, level) in ('mute', 'off')
         data = dict(route or {}, at_unix=speak.time.time() - age) if route else {}
+        if mac_rooms is not None:
+            data['mac_rooms'] = mac_rooms
+        if his_room:
+            data['his_room'] = his_room
         data.update({'level': level, 'levels': levels, 'mac_silent': mac_silent,
                      'silent_rooms': sorted(r for r in levels if silent(r)),
                      'phones': [dict(p, silent=True) if silent(p['room']) else p for p in (phones or [])]})
@@ -1702,7 +1717,8 @@ class VoiceRules(SpeakerTests):
         self.assertEqual(speak.routed(self.cfg(path), 'heard').get('silent_in'), 'Nerdvana')
         with open(speak.LAST_PROMPT, 'w') as f:
             json.dump({'heard': True, 'rooms': ['Lab'], 'at_unix': speak.time.time()}, f)
-        self.assertEqual(speak.routed(self.cfg(path), 'heard'), self.cfg(path))
+        # No device listed in the Lab; the Mac's rooms unknown, so the Mac counts as there.
+        self.assertEqual(speak.routed(self.cfg(path), 'heard'), dict(self.cfg(path), output='app', on_mac=True))
 
     def test_a_hub_that_stopped_silences_nothing(self):
         # Its levels count only while its status.json is fresh.
@@ -1717,11 +1733,16 @@ class VoiceRules(SpeakerTests):
             json.dump({'room': 'Lab', 'addresses': ['192.168.1.40:47811'], 'at_unix': speak.time.time()}, f)
         self.assertIsNone(speak.hub_levels(self.cfg(route)))
 
-    def test_the_silent_reply_needs_the_hubs_file(self):
+    def test_the_silent_reply_needs_the_hubs_folder(self):
+        # The skeptic's follow-up: commands.jsonl is created when missing (the hub reads it once it
+        # exists); the hub's folder never is.
         path = self.write_hub({'room': 'Nerdvana', 'phone': 'iPhone 16pro', 'addresses': ['192.168.0.17:47811']},
                               level='mute', phones=[self.NERDVANA], commands=False)
-        self.assertFalse(speak.show_silently(speak.config() | self.cfg(path), 'Nerdvana', 'Hello.'))
-        self.assertIsNone(self.commands())          # never created here
+        self.assertTrue(speak.show_silently(speak.config() | self.cfg(path), 'Nerdvana', 'Hello.'))
+        self.assertEqual(self.commands(), [{'cmd': 'silent_reply', 'room': 'Nerdvana', 'text': 'Hello.'}])
+        gone = os.path.join(self.dir.name, 'no-hub', 'voice-route.json')
+        self.assertFalse(speak.show_silently(self.cfg(gone), 'Nerdvana', 'Hello.'))
+        self.assertFalse(os.path.exists(os.path.dirname(gone)))
         self.assertIn('silent reply for Nerdvana:', self.log_text())
 
     # D: what no room asked for.
@@ -1742,7 +1763,7 @@ class VoiceRules(SpeakerTests):
             app_phone.assert_not_called()
             here.assert_not_called()
             self.assertEqual(self.commands(), [])
-            self.assertIn(f'voice route ({turn}): every room is muted or set not to speak; silent', self.log_text())
+            self.assertIn(f'voice route ({turn}): no room it may play in; silent', self.log_text())
 
     def test_the_incident_with_only_nerdvana_muted(self):
         # His room muted, Labmac not (auto-mute unsure where he is): the Mac app there speaks it,
@@ -1798,6 +1819,102 @@ class VoiceRules(SpeakerTests):
                 json.dump(shape, f)
             for turn in ('heard', 'typed', 'notice'):
                 speak.routed(self.cfg(path), turn)
+
+
+class VoiceRulesFollowUp(SpeakerTests):
+    """The skeptic's findings on the first round (2026-10-17), with hub 0.2.36's "mac_rooms" and
+    "his_room": a heard line's reply belongs to the room its 👂 label names, never to a route
+    from another room; the Mac's speakers count in every room they are in; and rule D goes to the
+    room he is in when the hub knows it."""
+
+    LAB, NERDVANA, MAC_APP = VoiceRules.LAB, VoiceRules.NERDVANA, VoiceRules.MAC_APP
+    write_hub, commands, cfg = VoiceRules.write_hub, VoiceRules.commands, VoiceRules.cfg
+
+    def heard_from(self, *rooms):
+        with open(speak.LAST_PROMPT, 'w') as f:
+            json.dump({'heard': True, 'rooms': list(rooms), 'at_unix': speak.time.time()}, f)
+
+    LAB_ROUTE = {'room': 'Lab', 'phone': 'Lab XS', 'addresses': ['192.168.1.40:47811'], 'fallback': 'stream_only'}
+
+    def test_a_late_line_from_a_muted_room_is_never_answered_aloud_elsewhere(self):
+        # The HIGH finding: "👂 Nerdvana (late, 13:40): …" renews no route; the Lab's, 2 minutes
+        # old, pointed at the Lab XS, and her reply played there.
+        path = self.write_hub(self.LAB_ROUTE, levels={'Lab': 'normal', 'Nerdvana': 'mute'},
+                              phones=[self.LAB, self.NERDVANA], age=2 * 60)
+        speak.note_prompt('👂 Nerdvana (late, 13:40): Sakamoto, which one was it?')
+        with mock.patch.object(speak, 'app_phone') as app_phone, mock.patch.object(speak, 'app_read_here') as here:
+            run, deliver = self.run_speaker(self.cfg(path), text='The second one.\n13:42', turn='heard')
+        run.assert_not_called()
+        deliver.assert_not_called()
+        app_phone.assert_not_called()
+        here.assert_not_called()
+        self.assertEqual(self.commands(), [{'cmd': 'silent_reply', 'room': 'Nerdvana', 'text': 'The second one.\n13:42'}])
+        self.assertIn('voice route (heard): Nerdvana is muted; silent everywhere; shown there', self.log_text())
+
+    def test_a_late_line_from_a_room_that_is_not_muted_is_answered_there(self):
+        path = self.write_hub(self.LAB_ROUTE, levels={'Lab': 'normal', 'Nerdvana': 'normal'},
+                              phones=[self.LAB, self.NERDVANA], age=2 * 60)
+        self.heard_from('Nerdvana')
+        routed = speak.routed(self.cfg(path), 'heard')
+        self.assertEqual([t['name'] for t in routed['targets']], ['iPhone 16pro'])
+        self.assertEqual(routed['output'], 'app-phone')
+        # The route's own room: the route, as before.
+        self.heard_from('Lab')
+        self.assertEqual([t['name'] for t in speak.routed(self.cfg(path), 'heard')['targets']], ['Lab XS'])
+        # No device in the line's room, the Mac's speakers elsewhere: silent (the text is on screen).
+        path = self.write_hub(self.LAB_ROUTE, phones=[self.LAB], mac_rooms=['Labmac'])
+        self.heard_from('Nerdvana')
+        self.assertTrue(speak.routed(self.cfg(path), 'heard').get('silent'))
+
+    def test_a_line_heard_in_two_rooms_one_muted(self):
+        path = self.write_hub(self.LAB_ROUTE, levels={'Lab': 'normal', 'Nerdvana': 'off'}, phones=[self.LAB, self.NERDVANA])
+        self.heard_from('Lab', 'Nerdvana')
+        routed = speak.routed(self.cfg(path), 'heard')
+        self.assertEqual((routed.get('silent_in'), routed.get('silent_rooms')), ('Nerdvana', ['Nerdvana']))
+
+    def test_a_route_to_the_macs_speakers_in_a_muted_room(self):
+        # The Mac app in Labmac (the route's room) and mac_voice_rooms' Lab: the Lab muted, so the
+        # Mac's speakers are silent ("mac_silent"), though Labmac isn't.
+        path = self.write_hub({'room': 'Labmac', 'addresses': [], 'mac': True}, levels={'Labmac': 'normal', 'Lab': 'mute'},
+                              mac_silent=True, mac_rooms=['Lab', 'Labmac'], phones=[self.MAC_APP])
+        self.heard_from('Labmac')
+        with mock.patch.object(speak, 'app_read_here') as here:
+            run, deliver = self.run_speaker(self.cfg(path, 'app'), turn='heard')
+        run.assert_not_called()
+        here.assert_not_called()
+        self.assertEqual([c['room'] for c in self.commands()], ['Labmac'])
+
+    def test_his_room_decides_what_no_room_asked_for(self):
+        # The coordinator's decision for rule D: auto-mute knows his room: only there.
+        phones = [self.LAB, self.NERDVANA, self.MAC_APP]
+        path = self.write_hub(None, levels={'Lab': 'mute', 'Labmac': 'mute', 'Nerdvana': 'normal'}, mac_silent=True,
+                              mac_rooms=['Labmac'], his_room='Nerdvana', phones=phones)
+        for turn in ('typed', 'notice'):
+            routed = speak.routed(self.cfg(path, 'both'), turn)
+            self.assertEqual(([t['name'] for t in routed['targets']], routed['output']), (['iPhone 16pro'], 'phone'), turn)
+        # His room is the Lab, where the Mac's speakers are (Labmac auto-muted for it: no matter).
+        path = self.write_hub(None, levels={'Lab': 'normal', 'Labmac': 'mute', 'Nerdvana': 'mute'}, mac_silent=False,
+                              mac_rooms=['Lab', 'Labmac'], his_room='Lab', phones=[self.LAB, self.NERDVANA])
+        routed = speak.routed(self.cfg(path, 'both'), 'notice')
+        self.assertEqual(([t['name'] for t in routed['targets']], routed['output']), (['Lab XS'], 'both'))
+        # His room muted by hand: nowhere, not the other rooms.
+        path = self.write_hub(None, levels={'Lab': 'normal', 'Nerdvana': 'mute'}, his_room='Nerdvana',
+                              mac_rooms=['Lab'], phones=[self.LAB, self.NERDVANA])
+        self.assertTrue(speak.routed(self.cfg(path, 'both'), 'typed').get('silent'))
+        # His room unknown: every room that isn't muted, as before.
+        path = self.write_hub(None, levels={'Lab': 'normal', 'Nerdvana': 'mute'}, mac_rooms=['Lab'],
+                              phones=[self.LAB, self.NERDVANA])
+        routed = speak.routed(self.cfg(path, 'both'), 'typed')
+        self.assertEqual(([t['name'] for t in routed['targets']], routed['output']), (['Lab XS'], 'both'))
+
+    def test_her_time_after_an_emoji_makes_no_sound(self):
+        with mock.patch.object(speak, 'launch') as launch, \
+             mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'last_assistant_message': '👍\n13:40'}))), \
+             mock.patch.object(sys, 'argv', ['speak.py']):
+            self.write_config({'enabled': True})
+            speak.main()
+        launch.assert_not_called()
+        self.assertIn('response: nothing to say', self.log_text())
 
 
 class TurnKinds(Isolated):
