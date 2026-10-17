@@ -12,10 +12,19 @@ export function norm(s) {
   return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
-// A message's text for matching: its normalized text, without what its code blocks (`pre`) hold;
-// speak.py's key leaves fenced code out too.
+// The app's background-task status text, which is not the reply (2026-10-18: "2 background commands
+// running", "1 background command completed, 8 running", each shown twice, and a task card's
+// "Background command completed" heading): taken out of a message's raw text before matching.
+export function stripStatus(full) {
+  return String(full || '')
+    .replace(/\b\d+\s+background\s+(?:commands?|tasks?|agents?|shells?)(?:\s+(?:completed|running|failed|stopped))?(?:\s*,\s*\d+\s+(?:completed|running|failed|stopped))*/gi, ' ')
+    .replace(/\bbackground\s+(?:commands?|tasks?|agents?|shells?)\s+(?:completed|running|failed|stopped)\b(?:\s*\n\s*·[^\n]*)?/gi, ' ');
+}
+
+// A message's text for matching: its normalized text, without what its code blocks (`pre`) hold and
+// without background-task status text; speak.py's key leaves fenced code out too.
 export function messageText(full, codeBlocks) {
-  let text = norm(full);
+  let text = norm(stripStatus(full));
   for (const code of codeBlocks) {
     const c = norm(code);
     if (c.length >= 4) text = text.split(c).join('');

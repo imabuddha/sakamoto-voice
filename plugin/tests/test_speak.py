@@ -2308,6 +2308,45 @@ class VoiceRace(Isolated):
         self.assertEqual(too_far, -1)                    # more than 24 others among them
         self.assertEqual(no_key, 0)
 
+    def test_the_page_match_ignores_background_task_status(self):
+        """Background-task chrome (2026-10-18: "2 background commands running") is not the reply."""
+        import shutil
+        import subprocess
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node not found')
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'app-read-match.mjs')
+        code = (f'import {{ messageText, findKey }} from {json.dumps(os.path.abspath(here))};\n'
+                'const key = "goodthatmeanstheproblems";\n'
+                'const pages = [\n'
+                '  "Good.\\nBackground command completed\\n\\u00b7 wait for kit test completion\\n\\nGood. That means the problems\\n1 background command completed, 2 running\\n1 background command completed, 2 running",\n'
+                '  "2 background commands running\\n2 background commands running",\n'
+                '  "4 background tasks running Good, that means the problems",\n'
+                '  "Good, that means the problems 3 background agents completed, 1 running",\n'
+                '  "I ran 2 background jobs and 3 tasks.",\n'
+                '];\n'
+                'const texts = pages.map((p) => messageText(p, []));\n'
+                'console.log(JSON.stringify([texts, texts.map((t) => findKey(t, key))]));\n')
+        out = subprocess.run([node, '--input-type=module', '-e', code], capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        texts, found = json.loads(out.stdout)
+        self.assertEqual(texts[0], 'goodgoodthatmeanstheproblems')   # the task card's heading and label are gone
+        self.assertEqual(found[0], 4)                    # within the few letters allowed before the reply
+        self.assertEqual(texts[1], '')                   # a status-only row has no text of its own
+        self.assertEqual(texts[2], 'goodthatmeanstheproblems')
+        self.assertEqual(texts[3], 'goodthatmeanstheproblems')
+        self.assertEqual(texts[4], 'iran2backgroundjobsand3tasks')   # ordinary prose is kept
+        self.assertEqual(found[2:4], [0, 0])
+
+    def test_app_read_cuts_chrome_out_of_the_message(self):
+        """Source guard: the message is the assistant-message element, less its chrome."""
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'app-read.mjs')
+        with open(here) as f:
+            source = f.read()
+        self.assertIn('[data-testid="assistant-message"]', source)
+        self.assertIn('[data-find-omitted]', source)
+        self.assertIn('stripStatus', source)
+
 
 class HubListener:
     """A stand-in for Sakamoto Eyes' hub's her-voice.sock: keeps each connection's bytes, whole."""

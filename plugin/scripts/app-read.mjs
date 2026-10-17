@@ -12,14 +12,14 @@
 //
 // A message's text is matched without its code blocks, and the key may have a few other letters
 // among its own (a code block's label and Copy button): app-read-match.mjs.
-import { norm, messageText, findKey } from './app-read-match.mjs';
+import { norm, stripStatus, messageText, findKey } from './app-read-match.mjs';
 
 const port = process.argv[2] || '9229';
 const key = process.argv[3] || '';
 const WAIT_MS = Number(process.argv[4]) > 0 ? Number(process.argv[4]) : 8000;
 const POLL_MS = 50;         // longest pause between looks (an observer wakes it sooner when the page changes)
 const EARLIER_TEXT = 12;    // letters and digits allowed before the reply (a label at most, not a message)
-const matchCode = `const norm = ${norm}; const messageText = ${messageText}; const findKey = ${findKey};`;
+const matchCode = `const norm = ${norm}; const stripStatus = ${stripStatus}; const messageText = ${messageText}; const findKey = ${findKey};`;
 
 // Runs in the page: finds the button (newest first, among the last few), or says why not.
 const inPage = `(async () => {
@@ -28,11 +28,23 @@ const inPage = `(async () => {
   const POLL_MS = ${POLL_MS};
   ${matchCode}
   const label = 'button[aria-label="Read aloud"]';
-  // The message a button belongs to: its largest ancestor holding no other Read aloud button.
+  // The message a button belongs to. The app marks each reply as data-testid="assistant-message"
+  // (a row of only a background-task notice, "2 background commands running", has one too, with its
+  // own Read aloud button); without that mark, the largest ancestor holding no other Read aloud button.
   const messageOf = (button) => {
+    const marked = button.closest('[data-testid="assistant-message"]');
+    if (marked) return marked;
     let el = button;
     while (el.parentElement && el.parentElement.querySelectorAll(label).length === 1) el = el.parentElement;
     return el;
+  };
+  // The reply's text and code blocks without the app's own chrome: elements marked data-find-omitted
+  // (task cards, tool calls, the "Claude responded" heading) and the message-actions toolbar. A
+  // detached copy, so the page is untouched. stripStatus catches status text outside such elements.
+  const contentOf = (message) => {
+    const copy = message.cloneNode(true);
+    for (const chrome of copy.querySelectorAll('[data-find-omitted], [role="toolbar"], [data-testid="message-actions"]')) chrome.remove();
+    return { full: copy.textContent || '', code: [...copy.querySelectorAll('pre')].map((p) => p.textContent || '') };
   };
   const end = Date.now() + ${WAIT_MS};
   let why = 'no Read aloud button';
@@ -47,16 +59,19 @@ const inPage = `(async () => {
   try {
   for (;;) {
     const buttons = [...document.querySelectorAll(label)].slice(-4).reverse();
+    let logged = false;
     for (const button of buttons) {
       // The mark names what was read: the app may reuse a button for a newer message.
       // The app may head a block with a label ("Claude responded"), which isn't earlier text.
       const message = messageOf(button);
-      const text = messageText(message.innerText || '', [...message.querySelectorAll('pre')].map((p) => p.innerText || ''))
-        .replace(/^clauderesponded/, '');
+      const content = contentOf(message);
+      const text = messageText(content.full, content.code).replace(/^clauderesponded/, '');
       const at = findKey(text, key);
       if (at < 0) {
         // For the log: the start and length of what the newest button's message holds.
-        if (button === buttons[0]) {
+        // (a status-only row, with no text of its own, doesn't count as the newest message)
+        if (text && !logged) {
+          logged = true;
           why = 'no matching message; the newest holds ' + text.length + ' chars: ' + text.slice(0, 40);
         }
         continue;
