@@ -1164,6 +1164,44 @@ class StreamTests(FakeToolCase):
         self.assertEqual(phone.audio, [b''])
         deliver.assert_called_once()
 
+    def test_the_mac_app_is_streamed_to_like_a_phone_and_the_mac_stays_quiet(self):
+        # Sakamoto Eyes' Mac app (2026-10-17): her voice's receiver on 127.0.0.1, which the hub
+        # names in the route as a phone's. app-both plays as app-phone there: the Claude app's
+        # voice is tapped muted (the Mac's speakers quiet) and streamed to the Mac app, which
+        # plays it through its own echo canceller; nothing else is tried.
+        mac_app = self.phone()
+        path = os.path.join(self.dir.name, 'voice-route.json')
+        with open(path, 'w') as f:
+            json.dump({'room': 'Lab', 'phone': 'Mac', 'addresses': [mac_app.address], 'fallback': 'any',
+                       'at_unix': time.time() - 5, 'phones': [{'name': 'Mac', 'room': 'Lab',
+                                                               'addresses': [mac_app.address]}]}, f)
+        self.write_config(dict(speak.DEFAULTS, output='app-both', phone_token='123456', phone=closed_port(),
+                               phone_route=path, default_lang='en'))
+        fd, text = tempfile.mkstemp(dir=self.dir.name)
+        with os.fdopen(fd, 'w') as f:
+            f.write('Hello')
+        mutes = []
+        real = speak.Tap
+
+        def tap(path, mute=True):
+            mutes.append(mute)
+            return real(path, mute=mute)
+        with self.mode('ok'), \
+             mock.patch.object(speak, 'tap_path', return_value=self.tool), \
+             mock.patch.object(speak, 'Tap', tap), \
+             mock.patch.object(speak, 'find_phone') as find, \
+             mock.patch.object(speak, 'app_read', return_value=True), \
+             mock.patch.object(speak, 'app_read_here') as here, \
+             mock.patch.object(speak, 'mac_says') as says, \
+             mock.patch.object(speak, 'deliver_to_phone') as deliver:
+            speak.speak(text, turn='heard')
+        self.assertTrue(mac_app.done.wait(5))
+        self.assertEqual(mac_app.audio, [AUDIO])
+        self.assertEqual(mutes, [True])
+        for unused in (find, here, says, deliver):
+            unused.assert_not_called()
+        self.assertIn('voice route (heard): Mac', self.log_text())
+
 
 class AppPhoneCommandTests(Isolated):
     run_main = CommandTests.run_main
@@ -1379,16 +1417,111 @@ class VoiceRoute(SpeakerTests):
         cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-phone'}
         self.assertEqual(speak.routed(cfg, 'heard'), cfg)
 
-    def test_a_route_to_the_mac_leaves_typed_and_unprompted_replies_as_they_were(self):
-        route = self.write_mac_route()
+    def test_a_recent_route_to_the_mac_takes_typed_and_unprompted_replies_there_too(self):
+        # John, 2026-10-17 09:36: a reply to a notice (or a typed message) went to every listed
+        # phone, so while he was in the Lab her reply played in the lounge.
+        route = self.write_mac_route(age=4 * 60)
         cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-both'}
-        self.assertEqual(speak.routed(cfg, 'typed'), cfg)
-        self.assertEqual([t['name'] for t in speak.routed(cfg, 'notice')['targets']], ['16 Pro'])
+        for turn in ('typed', 'notice'):
+            routed = speak.routed(cfg, turn)
+            self.assertEqual((routed['output'], routed.get('on_mac')), ('app', True), turn)
+            self.assertNotIn('targets', routed)
 
-    def test_a_reply_to_a_typed_prompt_is_as_before(self):
+    def test_the_window_for_typed_and_unprompted_replies_is_five_minutes(self):
+        # The skeptic: 30 minutes was far too long (John in Nerdvana, typing 20 minutes after a
+        # Lab line, would hear her only in the empty Lab).
+        self.assertEqual(speak.FOLLOW_MAX_AGE, 5 * 60)
+        for age in (6 * 60, 20 * 60, 31 * 60):
+            route = self.write_mac_route(age=age)
+            cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-both'}
+            self.assertEqual(speak.routed(cfg, 'typed'), cfg, age)
+            self.assertEqual([t['name'] for t in speak.routed(cfg, 'notice')['targets']], ['16 Pro'], age)
+        # A heard line's reply keeps the longer window.
+        route = self.write_mac_route(age=20 * 60)
+        self.assertTrue(speak.routed({'phone_route': route, 'output': 'app-both'}, 'heard').get('on_mac'))
+
+    def test_a_typed_reply_follows_only_a_route_to_the_mac_app_or_the_mac(self):
+        # His typing is at the Mac: a route there says he is at the desk; a route to a phone in
+        # another room says nothing about where he types.
         route = self.write_route(['192.168.1.40:47811'], phones=[self.LAB, self.DEN])
         cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-both'}
         self.assertEqual(speak.routed(cfg, 'typed'), cfg)
+        path = os.path.join(self.dir.name, 'voice-route.json')
+        with open(path, 'w') as f:
+            json.dump({'room': 'Lab', 'phone': 'Mac', 'addresses': ['127.0.0.1:47823'], 'fallback': 'any',
+                       'at_unix': speak.time.time() - 60, 'phones': [self.DEN]}, f)
+        routed = speak.routed(dict(cfg, phone_route=path), 'typed')
+        self.assertEqual(routed['output'], 'app-phone')
+        self.assertEqual([(t['name'], t['addresses'], t.get('mac_fallback')) for t in routed['targets']],
+                         [('Mac', ['127.0.0.1:47823'], True)])
+
+    def test_a_malformed_route_never_raises(self):
+        now = speak.time.time()
+        path = os.path.join(self.dir.name, 'voice-route.json')
+        shapes = [
+            {'room': 'Lab', 'addresses': 5, 'at_unix': now},
+            {'room': 'Lab', 'addresses': '127.0.0.1:47823', 'at_unix': now},
+            {'room': 'Lab', 'addresses': [1, None, ['x'], '', '127.0.0.1:47823'], 'at_unix': now},
+            {'room': 'Lab', 'addresses': {'a': 1}, 'mac': 'yes', 'at_unix': now},
+            {'room': ['Lab'], 'phone': 7, 'fallback': 3, 'addresses': ['10.0.0.2:47811'], 'at_unix': now},
+            {'addresses': ['10.0.0.2:47811'], 'at_unix': [now]},
+            {'addresses': ['10.0.0.2:47811'], 'at_unix': 'soon'},
+            {'addresses': ['10.0.0.2:47811'], 'at_unix': now, 'phones': {'a': 1}},
+            {'addresses': [], 'at_unix': now,
+             'phones': [3, 'x', {'addresses': 'x'}, {'name': 5, 'fallback': [], 'addresses': [5, '10.0.0.3:1']}]},
+            ['not', 'a', 'dict'],
+            'a string',
+            None,
+        ]
+        for shape in shapes:
+            with open(path, 'w') as f:
+                json.dump(shape, f)
+            cfg = {'phone_token': '123456', 'phone_route': path, 'output': 'app-both'}
+            for turn in ('heard', 'typed', 'notice'):
+                routed = speak.routed(cfg, turn)
+                for target in routed.get('targets') or []:
+                    self.assertTrue(all(isinstance(a, str) and a for a in target['addresses']), (shape, turn))
+                    self.assertIsInstance(target['name'], str)
+                    self.assertIsInstance(target['fallback'], str)
+                ', '.join(map(speak.target_name, routed.get('targets') or []))   # the speaker's log line
+        with open(path, 'w') as f:
+            json.dump(shapes[2], f)
+        self.assertEqual(speak.route_addresses({'phone_route': path}), ['127.0.0.1:47823'])
+        with open(path, 'w') as f:
+            json.dump(shapes[1], f)
+        self.assertEqual(speak.route_addresses({'phone_route': path}), [])
+
+    def test_a_mac_app_that_does_not_answer_falls_back_to_the_macs_speakers(self):
+        # The Mac app is in the Mac's own room: when its receiver refuses, the Claude app reads on
+        # the Mac, not silence (a phone elsewhere that doesn't answer still means silence).
+        path = os.path.join(self.dir.name, 'voice-route.json')
+        with open(path, 'w') as f:
+            json.dump({'room': 'Lab', 'phone': 'Mac', 'addresses': [closed_port()], 'fallback': 'any',
+                       'at_unix': speak.time.time() - 5}, f)
+        with mock.patch.object(speak, 'tap_path', return_value='/bin/app-voice-tap'), \
+             mock.patch.object(speak, 'app_read', return_value=True) as click, \
+             mock.patch.object(speak, 'app_read_here', return_value=lambda: None) as here:
+            run, deliver = self.run_speaker({'output': 'app-both', 'default_lang': 'en', 'phone_token': '123456',
+                                             'phone_route': path}, turn='heard')
+        here.assert_called_once()
+        click.assert_not_called()
+        deliver.assert_not_called()
+        run.assert_not_called()
+        self.assertIn("the Mac app didn't answer; the Mac's own speakers", self.log_text())
+
+    def test_a_reply_to_a_notice_goes_where_the_recent_route_points_not_to_every_phone(self):
+        route = self.write_route(['192.168.1.40:47811'], phones=[self.LAB, self.DEN])
+        run, deliver = self.run_speaker({'output': 'both', 'default_lang': 'en', 'phone_token': '123456',
+                                         'phone_route': route}, prompted=False)
+        self.assertEqual(self.spoken(run), [])
+        self.assertEqual([t['name'] for t in deliver.call_args[0][0]['targets']], ['Lab XS'])
+        self.assertIn('voice route (notice): Lab XS', self.log_text())
+
+    def test_a_reply_to_a_typed_prompt_is_as_before_without_a_fresh_route(self):
+        for route in (self.write_route(['192.168.1.40:47811'], age=31 * 60, phones=[self.LAB, self.DEN]),
+                      self.write_route([], phones=[self.LAB, self.DEN])):
+            cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-both'}
+            self.assertEqual(speak.routed(cfg, 'typed'), cfg)
 
     def test_the_mac_stays_quiet_under_a_route(self):
         route = self.write_route(['192.168.1.40:47811'])
@@ -1404,7 +1537,7 @@ class VoiceRoute(SpeakerTests):
         self.assertEqual(deliver.call_args[0][0]['targets'][0]['name'], 'Lab XS')
 
     def test_after_a_typed_prompt_the_mac_speaks_as_set(self):
-        route = self.write_route(['192.168.1.40:47811'])
+        route = self.write_route(['192.168.1.40:47811'], age=31 * 60)
         run, deliver = self.run_speaker({'output': 'both', 'default_lang': 'en', 'phone_token': '123456',
                                          'phone_route': route}, turn='typed')
         self.assertEqual(self.spoken(run), ['Hello', '囲碁'])
@@ -1420,12 +1553,12 @@ class VoiceRoute(SpeakerTests):
         self.assertIn('voice route (notice): Lab XS, 16 Pro', self.log_text())
 
     def test_unprompted_without_listed_phones_is_as_before(self):
-        route = self.write_route(['192.168.1.40:47811'], phones=[])
+        route = self.write_route(['192.168.1.40:47811'], age=31 * 60, phones=[])
         cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-phone'}
         self.assertEqual(speak.routed(cfg, 'notice'), cfg)
 
     def test_the_text_goes_to_each_target(self):
-        route = self.write_route(['192.168.1.40:47811'], phones=[self.LAB, self.DEN])
+        route = self.write_route(['192.168.1.40:47811'], age=31 * 60, phones=[self.LAB, self.DEN])
         self.write_config({'phone_token': '123456', 'phone_route': route})
         cfg = speak.routed(speak.config(), 'notice')
         with mock.patch.object(speak, 'send_to_phone', return_value={'ok': True}) as send:
@@ -1453,8 +1586,9 @@ class VoiceRoute(SpeakerTests):
             self.assertEqual(deliver.call_args[0][0]['targets'][0]['name'], 'Lab XS')
 
     def run_broadcast(self, answers):
-        """app-phone to both listed phones, each answering its stream as `answers` says."""
-        route = self.write_route(['192.168.1.40:47811'], phones=[self.LAB, self.DEN])
+        """app-phone to both listed phones (no fresh route), each answering its stream as `answers`
+        says."""
+        route = self.write_route(['192.168.1.40:47811'], age=31 * 60, phones=[self.LAB, self.DEN])
         self.write_config({'output': 'app-phone', 'phone_token': '123456', 'phone_route': route})
         cfg = speak.routed(speak.config(), 'notice')
         socks = {name: mock.Mock(name=name) for name in answers}

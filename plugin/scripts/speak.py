@@ -68,10 +68,18 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
               the Mac ("mac": true, the Mac app's room: the line came from the Mac app, or no
               phone there plays her voice): only the Mac, as the output's Mac side ("app-phone"
               and "app-both" play as "app", "phone" and "both" as "mac"), never a phone. A route
-              older than 30 minutes, or naming neither an address nor the Mac, changes nothing;
-            - no prompt (a response to a notice: she speaks unprompted): every listed phone (the
-              app's voice streamed to all at once), and the Mac as output says;
-            - a typed prompt: as without phone_route.
+              older than 30 minutes, or naming neither an address nor the Mac, changes nothing.
+              Sakamoto Eyes' Mac app, when it plays her voice, is named as a phone (its
+              receiver on 127.0.0.1), so the Claude app's voice is streamed to it, muted here;
+              when it doesn't answer, the Mac's own speakers play instead (its room), not silence;
+            - no prompt (a response to a notice: she speaks unprompted), while the route of the
+              latest heard line is at most 5 minutes old (FOLLOW_MAX_AGE): where it points, as for
+              a heard line, never every phone (2026-10-17: a reply to a notice played in the
+              lounge while John was in the Lab); a typed prompt the same, but only when that route
+              names the Mac app or the Mac (he types at the Mac);
+            - no prompt otherwise: every listed phone (the app's voice streamed to all at once),
+              and the Mac as output says;
+            - a typed prompt otherwise: as without phone_route.
             Every phone needs the same pairing code (phone_token). While the hub runs (its
             her-voice.sock next to voice-route.json), it also hears of every reading on the Mac's
             own speakers, as it plays: the stream's copy marked "mac", the app's voice on the Mac
@@ -159,14 +167,30 @@ def remember(**changes):
 
 
 ROUTE_MAX_AGE = 30 * 60      # seconds: an older voice route is ignored
+# Seconds: a reply to a notice or a typed prompt follows the latest heard line's route only while
+# it is this recent (2026-10-17: where the conversation is now; after that, as without a route).
+FOLLOW_MAX_AGE = 5 * 60
 ROUTED_OUTPUTS = {'both': 'phone', 'app-both': 'app-phone'}   # the Mac stays quiet under a route
 # A route to the Mac's speakers ("mac": the Mac app's room): each output's Mac side, no phone.
 MAC_OUTPUTS = {'app': 'app', 'app-both': 'app', 'app-phone': 'app', 'mac': 'mac', 'both': 'mac', 'phone': 'mac'}
 
 
 def addresses_of(entry):
-    """The "host:port" strings in a route's or a listed phone's `addresses`."""
-    return [a for a in entry.get('addresses') or [] if isinstance(a, str) and a]
+    """The "host:port" strings in a route's or a listed phone's `addresses` (a list; anything
+    else, or any item that isn't a non-empty string, is ignored)."""
+    addresses = entry.get('addresses') if isinstance(entry, dict) else None
+    return [a for a in addresses if isinstance(a, str) and a] if isinstance(addresses, list) else []
+
+
+def text_of(value, default):
+    """A route's field as text: `value` when it is a non-empty string, else `default`."""
+    return value if isinstance(value, str) and value else default
+
+
+def on_this_mac(addresses):
+    """Whether every address is this Mac's loopback (Sakamoto Eyes' Mac app, which the hub names
+    as a phone): the Mac's own room, so its own speakers are the fallback, not silence."""
+    return bool(addresses) and all(a.startswith('127.') or a.startswith('[::1]') for a in addresses)
 
 
 def route_file(cfg):
@@ -210,7 +234,8 @@ def listed_phones(cfg):
     phones = route_file(cfg).get('phones')
     if not isinstance(phones, list):
         return []
-    return [dict(p, addresses=addresses_of(p)) for p in phones if isinstance(p, dict) and addresses_of(p)]
+    return [dict(p, addresses=addresses_of(p), name=text_of(p.get('name'), 'a phone'))
+            for p in phones if isinstance(p, dict) and addresses_of(p)]
 
 
 # The kind of turn a response ends: 'heard', a reply to a line Sakamoto
@@ -260,22 +285,40 @@ def routed(cfg, turn='heard'):
       when it doesn't say). A route to the Mac ("mac": the line came from the Mac app's room):
       only the Mac, as the output's Mac side (MAC_OUTPUTS: "app-phone" as "app", "both" as
       "mac"), with no phone (`on_mac`).
-    - 'notice' (she speaks unprompted), with phones listed: every one of them (`targets`), and
-      the Mac as `output` says.
-    - 'typed', or no route or list: unchanged."""
-    if turn == 'heard':
-        route = voice_route(cfg)
-        if not route:
-            return cfg
+    - 'notice' (she speaks unprompted), while the route of his latest heard line is at most
+      FOLLOW_MAX_AGE old: as 'heard' (John, 2026-10-17 09:36: her reply to a notice went to
+      every listed phone, so while he was in the Lab it played in the lounge). The route says
+      where the conversation is: the routed phone (or Sakamoto Eyes' Mac app, which the hub names
+      as a phone, on 127.0.0.1), or the Mac.
+    - 'typed', the same, but only when that route names the Mac app or the Mac: he types at the
+      Mac, so only a route there says he is at the desk.
+    - 'notice' otherwise, with phones listed: every one of them (`targets`), and the Mac as
+      `output` says.
+    - 'typed' otherwise, or no route or list: unchanged.
+    A target on this Mac (the Mac app, `mac_fallback`) that doesn't answer gives way to the Mac's
+    own speakers (app_phone), never silence: it is in the Mac's room. A malformed route counts as
+    none, field by field (never an exception)."""
+    route = voice_route(cfg)
+    if route and turn in ('notice', 'typed'):
+        try:
+            recent = time.time() - float(route.get('at_unix', 0)) <= FOLLOW_MAX_AGE
+        except (TypeError, ValueError):
+            recent = False
+        at_mac = route.get('mac') is True or on_this_mac(route['addresses'])
+        if not recent or (turn == 'typed' and not at_mac):
+            route = None
+    if route and turn in ('heard', 'notice', 'typed'):
         if route.get('mac') is True:
             return dict(cfg, output=MAC_OUTPUTS.get(cfg.get('output'), 'mac'), on_mac=True)
-        target = {'name': route.get('phone') or route.get('room') or 'the routed phone',
-                  'addresses': route['addresses'], 'fallback': route.get('fallback') or 'any'}
+        target = {'name': text_of(route.get('phone'), text_of(route.get('room'), 'the routed phone')),
+                  'addresses': route['addresses'], 'fallback': text_of(route.get('fallback'), 'any')}
+        if on_this_mac(route['addresses']):
+            target['mac_fallback'] = True
         return dict(cfg, output=ROUTED_OUTPUTS.get(cfg.get('output'), cfg.get('output')), targets=[target])
     if turn == 'notice':
         phones = listed_phones(cfg)
         if phones:
-            return dict(cfg, targets=[dict(p, fallback=p.get('fallback') or 'any') for p in phones])
+            return dict(cfg, targets=[dict(p, fallback=text_of(p.get('fallback'), 'any')) for p in phones])
     return cfg
 
 
@@ -1344,6 +1387,8 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
     both (output app-both): the Mac isn't muted, so the voice plays here and on the phone. Then a
     failure doesn't fall back here; it returns where things stopped, for the caller to choose:
     'before-click' (nothing pressed yet), 'not-clicked', or 'no-sound'. None when it streamed.
+    'mac' (not both): every target was Sakamoto Eyes' Mac app (`mac_fallback`) and none answered;
+    the caller reads on the Mac's own speakers instead.
 
     A phone that wants the text (its Claude's Voice setting) declines the stream; that's kept as
     phone_voice (open_stream), so the next response doesn't try, and this one's text is sent
@@ -1400,6 +1445,11 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
         else:
             streams.append((target, sock))
     if not streams:
+        if not both and not no_answer and not want_text and all(t and t.get('mac_fallback') for t in targets):
+            # Sakamoto Eyes' Mac app, in the Mac's own room, refused or isn't running: the Mac's
+            # own speakers rather than silence (speak() reads there).
+            log("app-phone: the Mac app didn't answer; the Mac's own speakers")
+            return 'mac'
         if no_answer:
             return fallback("the phone didn't answer the stream (is its app 0.3.0 or later?)", to=no_answer)
         if want_text:
@@ -1604,9 +1654,12 @@ def speak(path, prompted=True, turn=None):
         if chunks and cfg.get('phone_voice') == 'text':
             log('app-phone: the phone wants the text; sending it, no stream')
             deliver_to_phone(dict(cfg, phone_mode='text'), text, phone_runs, chunks, voices)
-        elif chunks:
-            app_phone(cfg, raw, text, phone_runs, chunks, voices)   # the app's voice on the phone, else text there
-        output = None
+        elif chunks and app_phone(cfg, raw, text, phone_runs, chunks, voices) == 'mac':
+            # The Mac app didn't answer: the app's voice on the Mac itself, else the Mac's.
+            follow = app_read_here(cfg, raw)
+            output = None if follow else 'mac'
+        if output == 'app-phone':
+            output = None       # the app's voice on the phone, else text there (app_phone)
     phone = None
     if chunks and output in ('phone', 'both'):
         # Alongside the Mac's own speech, so both start together.
