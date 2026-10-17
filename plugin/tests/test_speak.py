@@ -1236,11 +1236,13 @@ class NothingToSay(unittest.TestCase):
         for text in ('08:31 …', '8:31…', '…', '07:24 ...', ' 08:31 … ', '08:31 🦉', '08:31 🏓🎉',
                      '08:31 👩🏻‍🔬', '🫖', '08:31 🎉 🤔', '08:31 🧜🏻‍♀️🕵🏻‍♀️🇯🇵',
                      # Sakamoto Eyes' avatar escapes: become a mermaid, come back, think of herself.
-                     '09:06 👩🏻‍🔬🧜🏻‍♀️', '09:06 👩🏻‍🔬🧜🏻‍♀️🎉🤔', '09:06 👩🏻‍🔬👩🏻‍🔬', '09:06 👩🏻‍🔬👩🏻‍🔬👩🏻‍🔬'):
+                     '09:06 👩🏻‍🔬🧜🏻‍♀️', '09:06 👩🏻‍🔬🧜🏻‍♀️🎉🤔', '09:06 👩🏻‍🔬👩🏻‍🔬', '09:06 👩🏻‍🔬👩🏻‍🔬👩🏻‍🔬',
+                     # John, 2026-10-17 15:35: her time sign-off alone makes no sound, in any mode.
+                     '08:31', ' 8:31\n', '13:40 '):
             self.assertTrue(speak.nothing_to_say(text), text)
 
     def test_anything_more_is_spoken(self):
-        for text in ('08:31 … hello', '08:31 Bumble', 'Wait…', '08:31', '08:31 🦉 owl', '08:31 ★☆★☆',
+        for text in ('08:31 … hello', '08:31 Bumble', 'Wait…', '08:31 🦉 owl', '08:31 ★☆★☆', '08:31:15',
                      '08:31 🎉🤔👍🦉', '09:06 👩🏻‍🔬🧜🏻‍♀️🎉🤔👍'):
             self.assertFalse(speak.nothing_to_say(text), text)
 
@@ -1417,43 +1419,25 @@ class VoiceRoute(SpeakerTests):
         cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-phone'}
         self.assertEqual(speak.routed(cfg, 'heard'), cfg)
 
-    def test_a_recent_route_to_the_mac_takes_typed_and_unprompted_replies_there_too(self):
-        # John, 2026-10-17 09:36: a reply to a notice (or a typed message) went to every listed
-        # phone, so while he was in the Lab her reply played in the lounge.
-        route = self.write_mac_route(age=4 * 60)
-        cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-both'}
-        for turn in ('typed', 'notice'):
-            routed = speak.routed(cfg, turn)
-            self.assertEqual((routed['output'], routed.get('on_mac')), ('app', True), turn)
-            self.assertNotIn('targets', routed)
-
-    def test_the_window_for_typed_and_unprompted_replies_is_five_minutes(self):
-        # The skeptic: 30 minutes was far too long (John in Nerdvana, typing 20 minutes after a
-        # Lab line, would hear her only in the empty Lab).
-        self.assertEqual(speak.FOLLOW_MAX_AGE, 5 * 60)
-        for age in (6 * 60, 20 * 60, 31 * 60):
+    def test_typed_and_unprompted_replies_never_follow_a_route(self):
+        # 2026-10-17 13:45-14:02: replies to typed prompts played on the Mac for Labmac, where a
+        # route 5 minutes old pointed, while John sat in Nerdvana. A route says where a heard line
+        # came from, not where anyone is now; with the hub's levels, see VoiceRules.
+        for age in (60, 4 * 60, 20 * 60):
             route = self.write_mac_route(age=age)
             cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-both'}
             self.assertEqual(speak.routed(cfg, 'typed'), cfg, age)
             self.assertEqual([t['name'] for t in speak.routed(cfg, 'notice')['targets']], ['16 Pro'], age)
-        # A heard line's reply keeps the longer window.
-        route = self.write_mac_route(age=20 * 60)
-        self.assertTrue(speak.routed({'phone_route': route, 'output': 'app-both'}, 'heard').get('on_mac'))
-
-    def test_a_typed_reply_follows_only_a_route_to_the_mac_app_or_the_mac(self):
-        # His typing is at the Mac: a route there says he is at the desk; a route to a phone in
-        # another room says nothing about where he types.
-        route = self.write_route(['192.168.1.40:47811'], phones=[self.LAB, self.DEN])
-        cfg = {'phone_token': '123456', 'phone_route': route, 'output': 'app-both'}
-        self.assertEqual(speak.routed(cfg, 'typed'), cfg)
+            self.assertFalse(hasattr(speak, 'FOLLOW_MAX_AGE'))
         path = os.path.join(self.dir.name, 'voice-route.json')
         with open(path, 'w') as f:
             json.dump({'room': 'Lab', 'phone': 'Mac', 'addresses': ['127.0.0.1:47823'], 'fallback': 'any',
                        'at_unix': speak.time.time() - 60, 'phones': [self.DEN]}, f)
-        routed = speak.routed(dict(cfg, phone_route=path), 'typed')
-        self.assertEqual(routed['output'], 'app-phone')
-        self.assertEqual([(t['name'], t['addresses'], t.get('mac_fallback')) for t in routed['targets']],
-                         [('Mac', ['127.0.0.1:47823'], True)])
+        cfg = {'phone_token': '123456', 'phone_route': path, 'output': 'app-both'}
+        self.assertEqual(speak.routed(cfg, 'typed'), cfg)
+        # A heard line's reply keeps its route for 30 minutes.
+        route = self.write_mac_route(age=20 * 60)
+        self.assertTrue(speak.routed({'phone_route': route, 'output': 'app-both'}, 'heard').get('on_mac'))
 
     def test_a_malformed_route_never_raises(self):
         now = speak.time.time()
@@ -1509,13 +1493,13 @@ class VoiceRoute(SpeakerTests):
         run.assert_not_called()
         self.assertIn("the Mac app didn't answer; the Mac's own speakers", self.log_text())
 
-    def test_a_reply_to_a_notice_goes_where_the_recent_route_points_not_to_every_phone(self):
+    def test_a_reply_to_a_notice_goes_to_every_listed_phone_whatever_the_route(self):
         route = self.write_route(['192.168.1.40:47811'], phones=[self.LAB, self.DEN])
         run, deliver = self.run_speaker({'output': 'both', 'default_lang': 'en', 'phone_token': '123456',
                                          'phone_route': route}, prompted=False)
-        self.assertEqual(self.spoken(run), [])
-        self.assertEqual([t['name'] for t in deliver.call_args[0][0]['targets']], ['Lab XS'])
-        self.assertIn('voice route (notice): Lab XS', self.log_text())
+        self.assertEqual(self.spoken(run), ['Hello', '囲碁'])
+        self.assertEqual([t['name'] for t in deliver.call_args[0][0]['targets']], ['Lab XS', '16 Pro'])
+        self.assertIn('voice route (notice): Lab XS, 16 Pro', self.log_text())
 
     def test_a_reply_to_a_typed_prompt_is_as_before_without_a_fresh_route(self):
         for route in (self.write_route(['192.168.1.40:47811'], age=31 * 60, phones=[self.LAB, self.DEN]),
@@ -1624,6 +1608,196 @@ class VoiceRoute(SpeakerTests):
             speak.stop_phone(cfg)
         self.assertEqual([c.args[0] for c in exchange.call_args_list],
                          ['192.168.1.40:47811', '192.168.1.50:47811', '100.64.0.9:47811'])
+
+
+class VoiceRules(SpeakerTests):
+    """John's rules for her voice (2026-10-17 15:24), with Sakamoto Eyes' hub 0.2.35 levels in
+    voice-route.json: (A) a reply goes to the room whose heard line asked for it; (B) a muted
+    room (Mute or Ears off) hears her nowhere, not through another room or the Mac either; (C)
+    its own screens show the reply instead (a silent_reply line for the hub); (D) a notice's or a
+    typed prompt's reply goes to every device set to speak it, except in muted rooms."""
+
+    LAB = {'name': 'Lab XS', 'room': 'Lab', 'addresses': ['192.168.1.40:47811'], 'fallback': 'stream_only'}
+    NERDVANA = {'name': 'iPhone 16pro', 'room': 'Nerdvana', 'addresses': ['192.168.0.17:47811'], 'fallback': 'any'}
+    MAC_APP = {'name': 'Mac', 'room': 'Labmac', 'addresses': ['127.0.0.1:47823'], 'fallback': 'any'}
+
+    def write_hub(self, route=None, level='normal', levels=None, mac_silent=False, phones=None, age=10,
+                  status_age=2, commands=True):
+        """The hub's state folder: voice-route.json (the route, if any, `age` seconds old; the
+        levels; the phones, each marked silent when its room is), status.json written
+        `status_age` seconds ago (None: none), and an empty commands.jsonl."""
+        state = os.path.join(self.dir.name, 'eyes-ears')
+        os.makedirs(state, exist_ok=True)
+        levels = levels or {}
+        silent = lambda room: levels.get(room, level) in ('mute', 'off')
+        data = dict(route or {}, at_unix=speak.time.time() - age) if route else {}
+        data.update({'level': level, 'levels': levels, 'mac_silent': mac_silent,
+                     'silent_rooms': sorted(r for r in levels if silent(r)),
+                     'phones': [dict(p, silent=True) if silent(p['room']) else p for p in (phones or [])]})
+        path = os.path.join(state, 'voice-route.json')
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        status = os.path.join(state, 'status.json')
+        if status_age is not None:
+            with open(status, 'w') as f:
+                f.write('{}')
+            then = speak.time.time() - status_age
+            os.utime(status, (then, then))
+        if commands:
+            open(os.path.join(state, 'commands.jsonl'), 'w').close()
+        return path
+
+    def commands(self):
+        try:
+            with open(os.path.join(self.dir.name, 'eyes-ears', 'commands.jsonl')) as f:
+                return [json.loads(line) for line in f if line.strip()]
+        except FileNotFoundError:
+            return None
+
+    def cfg(self, route, output='app-both'):
+        return {'phone_token': '123456', 'phone_route': route, 'output': output, 'default_lang': 'en'}
+
+    # A and B: a heard line's reply.
+
+    def test_a_reply_goes_to_the_room_that_asked(self):
+        route = self.write_hub({'room': 'Nerdvana', 'phone': 'iPhone 16pro', 'addresses': ['192.168.0.17:47811'],
+                                'fallback': 'any'}, levels={'Nerdvana': 'normal', 'Lab': 'mute'},
+                               phones=[self.LAB, self.NERDVANA])
+        routed = speak.routed(self.cfg(route), 'heard')
+        self.assertEqual([t['name'] for t in routed['targets']], ['iPhone 16pro'])
+        self.assertEqual(routed['output'], 'app-phone')     # the Mac quiet
+
+    def test_quiet_is_not_muted(self):
+        # At Quiet only lines naming her reach her, and she answers them aloud in their room.
+        route = self.write_hub({'room': 'Nerdvana', 'phone': 'iPhone 16pro', 'addresses': ['192.168.0.17:47811']},
+                               level='quiet', levels={'Nerdvana': 'quiet'}, phones=[self.NERDVANA])
+        self.assertEqual([t['name'] for t in speak.routed(self.cfg(route), 'heard')['targets']], ['iPhone 16pro'])
+        self.assertFalse(speak.routed(self.cfg(route), 'typed').get('silent'))
+
+    def test_a_muted_room_hears_her_nowhere_and_shows_the_reply(self):
+        for level in ('mute', 'off'):
+            for route in ({'room': 'Nerdvana', 'phone': 'iPhone 16pro', 'addresses': ['192.168.0.17:47811']},
+                          {'room': 'Labmac', 'addresses': [], 'mac': True},
+                          {'room': 'Labmac', 'phone': 'Mac', 'addresses': ['127.0.0.1:47823']}):
+                path = self.write_hub(route, levels={route['room']: level, 'Lab': 'normal'},
+                                      phones=[self.LAB, self.NERDVANA, self.MAC_APP])
+                with mock.patch.object(speak, 'app_phone') as app_phone, \
+                     mock.patch.object(speak, 'app_read_here') as here:
+                    run, deliver = self.run_speaker(self.cfg(path), text='13:47 Muted rooms get it on the sign.',
+                                                    turn='heard')
+                run.assert_not_called()
+                deliver.assert_not_called()
+                app_phone.assert_not_called()
+                here.assert_not_called()
+                self.assertEqual(self.commands(), [{'cmd': 'silent_reply', 'room': route['room'],
+                                                    'text': '13:47 Muted rooms get it on the sign.'}], (level, route))
+                self.assertIn(f"voice route (heard): {route['room']} is muted; silent everywhere; shown there",
+                              self.log_text())
+                self.assertFalse(os.path.exists(speak.PIDFILE))
+
+    def test_without_a_fresh_route_the_heard_lines_room_decides(self):
+        path = self.write_hub(None, levels={'Nerdvana': 'mute'}, phones=[self.NERDVANA])
+        with open(speak.LAST_PROMPT, 'w') as f:
+            json.dump({'heard': True, 'rooms': ['Nerdvana'], 'at_unix': speak.time.time()}, f)
+        self.assertEqual(speak.routed(self.cfg(path), 'heard').get('silent_in'), 'Nerdvana')
+        with open(speak.LAST_PROMPT, 'w') as f:
+            json.dump({'heard': True, 'rooms': ['Lab'], 'at_unix': speak.time.time()}, f)
+        self.assertEqual(speak.routed(self.cfg(path), 'heard'), self.cfg(path))
+
+    def test_a_hub_that_stopped_silences_nothing(self):
+        # Its levels count only while its status.json is fresh.
+        for status_age in (speak.LEVELS_MAX_AGE + 5, None):
+            path = self.write_hub({'room': 'Nerdvana', 'phone': 'iPhone 16pro', 'addresses': ['192.168.0.17:47811']},
+                                  level='mute', phones=[self.NERDVANA], status_age=status_age)
+            self.assertIsNone(speak.hub_levels(self.cfg(path)))
+            self.assertEqual([t['name'] for t in speak.routed(self.cfg(path), 'heard')['targets']], ['iPhone 16pro'])
+        # An older hub writes no levels: as before.
+        route = os.path.join(self.dir.name, 'eyes-ears', 'voice-route.json')
+        with open(route, 'w') as f:
+            json.dump({'room': 'Lab', 'addresses': ['192.168.1.40:47811'], 'at_unix': speak.time.time()}, f)
+        self.assertIsNone(speak.hub_levels(self.cfg(route)))
+
+    def test_the_silent_reply_needs_the_hubs_file(self):
+        path = self.write_hub({'room': 'Nerdvana', 'phone': 'iPhone 16pro', 'addresses': ['192.168.0.17:47811']},
+                              level='mute', phones=[self.NERDVANA], commands=False)
+        self.assertFalse(speak.show_silently(speak.config() | self.cfg(path), 'Nerdvana', 'Hello.'))
+        self.assertIsNone(self.commands())          # never created here
+        self.assertIn('silent reply for Nerdvana:', self.log_text())
+
+    # D: what no room asked for.
+
+    def test_the_incident_typed_replies_under_everyones_mute(self):
+        # 2026-10-17 13:45-14:02: everyone's Mute; the route from 13:40 named Labmac (the Mac
+        # app); John in Nerdvana. His typed prompts' replies played on the Mac. Now: nowhere,
+        # and nothing shown (he reads them in the Claude app, where he typed).
+        path = self.write_hub({'room': 'Labmac', 'phone': 'Mac', 'addresses': ['127.0.0.1:47823'], 'fallback': 'any'},
+                              level='mute', levels={'Labmac': 'mute', 'Nerdvana': 'mute'}, mac_silent=True,
+                              phones=[self.MAC_APP, self.NERDVANA], age=2 * 60)
+        for turn, prompted in (('typed', True), ('notice', False)):
+            with mock.patch.object(speak, 'app_phone') as app_phone, \
+                 mock.patch.object(speak, 'app_read_here') as here:
+                run, deliver = self.run_speaker(self.cfg(path), prompted=prompted, turn=turn)
+            run.assert_not_called()
+            deliver.assert_not_called()
+            app_phone.assert_not_called()
+            here.assert_not_called()
+            self.assertEqual(self.commands(), [])
+            self.assertIn(f'voice route ({turn}): every room is muted or set not to speak; silent', self.log_text())
+
+    def test_the_incident_with_only_nerdvana_muted(self):
+        # His room muted, Labmac not (auto-mute unsure where he is): the Mac app there speaks it,
+        # the muted phone doesn't, and the Mac's speakers stay quiet (the Mac app plays there).
+        path = self.write_hub({'room': 'Labmac', 'phone': 'Mac', 'addresses': ['127.0.0.1:47823']},
+                              levels={'Labmac': 'normal', 'Nerdvana': 'mute'},
+                              phones=[self.MAC_APP, self.NERDVANA], age=2 * 60)
+        routed = speak.routed(self.cfg(path), 'typed')
+        self.assertEqual([(t['name'], t.get('mac_fallback')) for t in routed['targets']], [('Mac', True)])
+        self.assertEqual(routed['output'], 'app-phone')
+
+    def test_every_unmuted_device_set_to_speak(self):
+        phones = [self.LAB, self.NERDVANA]
+        for output, mac_silent, levels, expected in (
+            ('both', False, {}, ('both', ['Lab XS', 'iPhone 16pro'], None)),
+            ('both', False, {'Nerdvana': 'mute'}, ('both', ['Lab XS'], None)),
+            ('both', True, {'Nerdvana': 'off'}, ('phone', ['Lab XS'], None)),
+            ('app-both', True, {}, ('app-phone', ['Lab XS', 'iPhone 16pro'], None)),
+            ('app-both', False, {'Lab': 'mute', 'Nerdvana': 'mute'}, ('app', [], True)),
+            ('both', False, {'Lab': 'mute', 'Nerdvana': 'mute'}, ('mac', [], True)),
+            ('mac', False, {'Lab': 'mute'}, ('mac', [], True)),
+            ('app', False, {}, ('app', [], True)),
+            ('phone', False, {'Lab': 'mute', 'Nerdvana': 'mute'}, None),
+            ('app-phone', False, {'Lab': 'mute', 'Nerdvana': 'mute'}, None),
+            ('mac', True, {}, None),
+            ('app', True, {}, None),
+        ):
+            path = self.write_hub(None, levels=levels, mac_silent=mac_silent, phones=phones)
+            for turn in ('typed', 'notice'):
+                routed = speak.routed(self.cfg(path, output), turn)
+                got = None if routed.get('silent') else \
+                    (routed['output'], [t['name'] for t in routed.get('targets', [])], routed.get('on_mac'))
+                self.assertEqual(got, expected, (output, mac_silent, levels, turn))
+
+    def test_the_room_he_is_in(self):
+        # Auto-mute: the rooms he isn't in are muted, so D reaches only his room's devices.
+        path = self.write_hub(None, levels={'Lab': 'mute', 'Nerdvana': 'normal'}, mac_silent=True,
+                              phones=[self.LAB, self.NERDVANA])
+        run, deliver = self.run_speaker(self.cfg(path, 'both'), prompted=False)
+        self.assertEqual(self.spoken(run), [])
+        self.assertEqual([t['name'] for t in deliver.call_args[0][0]['targets']], ['iPhone 16pro'])
+
+    def test_malformed_levels_never_raise(self):
+        state = os.path.join(self.dir.name, 'eyes-ears')
+        os.makedirs(state, exist_ok=True)
+        path = os.path.join(state, 'voice-route.json')
+        with open(os.path.join(state, 'status.json'), 'w') as f:
+            f.write('{}')
+        for shape in ({'level': 5, 'levels': [1], 'mac_silent': 'yes'}, {'levels': {'Lab': 3, 7: 'mute'}},
+                      {'level': None, 'phones': [{'name': 'x', 'room': 5, 'addresses': ['1.2.3.4:5'], 'silent': 'y'}]},
+                      {'level': 'mute', 'room': ['Lab'], 'addresses': ['1.2.3.4:5'], 'at_unix': speak.time.time()}):
+            with open(path, 'w') as f:
+                json.dump(shape, f)
+            for turn in ('heard', 'typed', 'notice'):
+                speak.routed(self.cfg(path), turn)
 
 
 class TurnKinds(Isolated):

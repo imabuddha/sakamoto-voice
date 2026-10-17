@@ -71,15 +71,22 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
               older than 30 minutes, or naming neither an address nor the Mac, changes nothing.
               Sakamoto Eyes' Mac app, when it plays her voice, is named as a phone (its
               receiver on 127.0.0.1), so the Claude app's voice is streamed to it, muted here;
-              when it doesn't answer, the Mac's own speakers play instead (its room), not silence;
-            - no prompt (a response to a notice: she speaks unprompted), while the route of the
-              latest heard line is at most 5 minutes old (FOLLOW_MAX_AGE): where it points, as for
-              a heard line, never every phone (2026-10-17: a reply to a notice played in the
-              lounge while John was in the Lab); a typed prompt the same, but only when that route
-              names the Mac app or the Mac (he types at the Mac);
-            - no prompt otherwise: every listed phone (the app's voice streamed to all at once),
-              and the Mac as output says;
-            - a typed prompt otherwise: as without phone_route.
+              when it doesn't answer, the Mac's own speakers play instead (its room), not silence.
+              When the route's room is muted (its level Mute or Ears off, as the hub says: see
+              below), nothing is heard anywhere, and the hub shows the reply silently in that room
+              (her sign for a few words, her board for more: a "silent_reply" line in its
+              commands.jsonl, next to voice-route.json);
+            - no prompt (a response to a notice: she speaks unprompted), or a typed prompt (no
+              room asked): every listed phone in a room that isn't muted (the app's voice streamed
+              to all at once), and the Mac as output says unless the Mac's speakers are in a muted
+              room ("mac_silent"); nothing at all when none is left. A route is never followed for
+              these (2026-10-17 13:45-14:02: replies to typed prompts played in Labmac, where the
+              route of a line 5 minutes old pointed, while John sat muted in Nerdvana). Without
+              the hub's levels, as before: a notice's reply to every listed phone and the Mac as
+              output says, a typed prompt's as without phone_route.
+            The hub's levels (hub 0.2.35: "level", everyone's; "levels", each room's; each phone's
+            "silent"; "mac_silent") count only while the hub runs (its status.json, next to
+            voice-route.json, written in the last LEVELS_MAX_AGE seconds).
             Every phone needs the same pairing code (phone_token). While the hub runs (its
             her-voice.sock next to voice-route.json), it also hears of every reading on the Mac's
             own speakers, as it plays: the stream's copy marked "mac", the app's voice on the Mac
@@ -167,9 +174,12 @@ def remember(**changes):
 
 
 ROUTE_MAX_AGE = 30 * 60      # seconds: an older voice route is ignored
-# Seconds: a reply to a notice or a typed prompt follows the latest heard line's route only while
-# it is this recent (2026-10-17: where the conversation is now; after that, as without a route).
-FOLLOW_MAX_AGE = 5 * 60
+# Sakamoto Eyes' listening levels at which her voice plays in no way in a room (John, 2026-10-17
+# 15:24: a muted room hears her nowhere, not even through another room or the Mac).
+SILENT_LEVELS = ('mute', 'off')
+# Seconds: the hub's levels in voice-route.json count only while its status.json is this fresh
+# (it rewrites it every 5 s), so a hub that stopped without tidying up never silences her.
+LEVELS_MAX_AGE = 60
 ROUTED_OUTPUTS = {'both': 'phone', 'app-both': 'app-phone'}   # the Mac stays quiet under a route
 # A route to the Mac's speakers ("mac": the Mac app's room): each output's Mac side, no phone.
 MAC_OUTPUTS = {'app': 'app', 'app-both': 'app', 'app-phone': 'app', 'mac': 'mac', 'both': 'mac', 'phone': 'mac'}
@@ -228,6 +238,43 @@ def route_addresses(cfg, now=None):
     return route['addresses'] if route else []
 
 
+def hub_levels(cfg, now=None):
+    """Sakamoto Eyes' listening levels as they bear on her voice (voice-route.json's "level",
+    "levels", and "mac_silent", hub 0.2.35), as {"level", "levels", "mac_silent"}; None when the
+    hub doesn't say, or isn't running (its status.json, next to voice-route.json, older than
+    LEVELS_MAX_AGE or missing). Malformed fields count as Normal and not silent."""
+    route = route_file(cfg)
+    if 'level' not in route and 'levels' not in route:
+        return None
+    status = os.path.join(os.path.dirname(os.path.expanduser(cfg.get('phone_route') or '')), 'status.json')
+    try:
+        if (now or time.time()) - os.path.getmtime(status) > LEVELS_MAX_AGE:
+            return None
+    except OSError:
+        return None
+    levels = route.get('levels')
+    levels = {k: v for k, v in levels.items() if isinstance(k, str) and isinstance(v, str)} \
+        if isinstance(levels, dict) else {}
+    return {'level': text_of(route.get('level'), 'normal'), 'levels': levels,
+            'mac_silent': route.get('mac_silent') is True}
+
+
+def room_silent(levels, room):
+    """Whether her voice plays in no way in `room` (its level Mute or Ears off; a room the hub
+    doesn't list has everyone's level)."""
+    return bool(levels) and levels['levels'].get(room, levels['level']) in SILENT_LEVELS
+
+
+def last_heard_rooms():
+    """The rooms of the last prompt when it was a 👂 line (LAST_PROMPT), else []."""
+    try:
+        with open(LAST_PROMPT, encoding='utf-8') as f:
+            rooms = json.load(f).get('rooms')
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [r for r in rooms if isinstance(r, str) and r] if isinstance(rooms, list) else []
+
+
 def listed_phones(cfg):
     """The phones the hub lists as connected and playing her voice (voice-route.json's
     "phones"), each {"name", "room", "addresses", "fallback"}; [] when none or off."""
@@ -276,7 +323,11 @@ def turn_kind(prompted):
 
 
 def routed(cfg, turn='heard'):
-    """The settings for speaking this turn under Sakamoto Eyes (phone_route). Never saved.
+    """The settings for speaking this turn under Sakamoto Eyes (phone_route). Never saved. John's
+    rules (2026-10-17 15:24): (A) a reply goes to the room whose heard line asked for it; (B) when
+    that room is muted, she speaks nowhere; (C) the hub shows it silently there instead; (D) what
+    no room asked for (a notice's reply, a typed prompt's) goes to every device whose setting says
+    so, except in muted rooms.
     - 'heard' (a reply to a 👂 line), with a fresh route: her voice goes only to the routed phone
       (`targets`; silent when it doesn't answer: never the usual phone, which may be in another
       room), and the Mac stays quiet ("both" as "phone", "app-both" as
@@ -284,30 +335,28 @@ def routed(cfg, turn='heard'):
       `fallback`): "stream_only" (silence) or "any" (the text in its voices; also
       when it doesn't say). A route to the Mac ("mac": the line came from the Mac app's room):
       only the Mac, as the output's Mac side (MAC_OUTPUTS: "app-phone" as "app", "both" as
-      "mac"), with no phone (`on_mac`).
-    - 'notice' (she speaks unprompted), while the route of his latest heard line is at most
-      FOLLOW_MAX_AGE old: as 'heard' (John, 2026-10-17 09:36: her reply to a notice went to
-      every listed phone, so while he was in the Lab it played in the lounge). The route says
-      where the conversation is: the routed phone (or Sakamoto Eyes' Mac app, which the hub names
-      as a phone, on 127.0.0.1), or the Mac.
-    - 'typed', the same, but only when that route names the Mac app or the Mac: he types at the
-      Mac, so only a route there says he is at the desk.
-    - 'notice' otherwise, with phones listed: every one of them (`targets`), and the Mac as
-      `output` says.
-    - 'typed' otherwise, or no route or list: unchanged.
+      "mac"), with no phone (`on_mac`). The route's room muted (hub_levels): `silent_in`, that
+      room (B, C). With no fresh route, a muted room of the 👂 line's (last_heard_rooms) does the
+      same; else unchanged.
+    - 'notice' or 'typed' (D), with the hub's levels: every listed phone in a room that isn't
+      muted (`targets`), and the Mac as `output` says unless its speakers are in a muted room
+      (`mac_silent`) or a target is the Mac app (it plays there); `silent` when neither is left.
+      No route is followed (2026-10-17 13:45-14:02: typed prompts' replies played in Labmac by
+      a route 5 minutes old while John sat muted in Nerdvana).
+    - 'notice' without them, with phones listed: every one of them, and the Mac as `output` says.
+    - 'typed' without them, or no route or list: unchanged.
     A target on this Mac (the Mac app, `mac_fallback`) that doesn't answer gives way to the Mac's
     own speakers (app_phone), never silence: it is in the Mac's room. A malformed route counts as
     none, field by field (never an exception)."""
-    route = voice_route(cfg)
-    if route and turn in ('notice', 'typed'):
-        try:
-            recent = time.time() - float(route.get('at_unix', 0)) <= FOLLOW_MAX_AGE
-        except (TypeError, ValueError):
-            recent = False
-        at_mac = route.get('mac') is True or on_this_mac(route['addresses'])
-        if not recent or (turn == 'typed' and not at_mac):
-            route = None
-    if route and turn in ('heard', 'notice', 'typed'):
+    levels = hub_levels(cfg)
+    if turn == 'heard':
+        route = voice_route(cfg)
+        room = text_of(route.get('room'), '') if route else ''
+        if route and room_silent(levels, room):
+            return dict(cfg, silent_in=room)
+        if not route:
+            muted = [r for r in last_heard_rooms() if room_silent(levels, r)]
+            return dict(cfg, silent_in=muted[0]) if muted else cfg
         if route.get('mac') is True:
             return dict(cfg, output=MAC_OUTPUTS.get(cfg.get('output'), 'mac'), on_mac=True)
         target = {'name': text_of(route.get('phone'), text_of(route.get('room'), 'the routed phone')),
@@ -315,11 +364,58 @@ def routed(cfg, turn='heard'):
         if on_this_mac(route['addresses']):
             target['mac_fallback'] = True
         return dict(cfg, output=ROUTED_OUTPUTS.get(cfg.get('output'), cfg.get('output')), targets=[target])
+    if levels is not None and turn in ('notice', 'typed'):
+        return everywhere(cfg, levels)
     if turn == 'notice':
         phones = listed_phones(cfg)
         if phones:
             return dict(cfg, targets=[dict(p, fallback=text_of(p.get('fallback'), 'any')) for p in phones])
     return cfg
+
+
+def everywhere(cfg, levels):
+    """Rule D (routed()): the listed phones in rooms that aren't muted, and the Mac's side of
+    `output` unless its speakers are in a muted room or a target is the Mac app."""
+    targets = []
+    for p in listed_phones(cfg):
+        if p.get('silent') is True or room_silent(levels, text_of(p.get('room'), '')):
+            continue
+        target = dict(p, fallback=text_of(p.get('fallback'), 'any'))
+        if on_this_mac(target['addresses']):
+            target['mac_fallback'] = True
+        targets.append(target)
+    output = cfg.get('output') if cfg.get('output') in OUTPUTS else 'mac'
+    phone = output in PHONE_OUTPUTS and bool(targets)
+    mac = output in ('mac', 'both', 'app', 'app-both') and not levels['mac_silent'] \
+        and not any(t.get('mac_fallback') for t in targets)
+    if phone and mac:
+        return dict(cfg, output=output, targets=targets)
+    if phone:
+        return dict(cfg, output=ROUTED_OUTPUTS.get(output, output), targets=targets)
+    if mac:
+        return dict(cfg, output=MAC_OUTPUTS.get(output, 'mac'), on_mac=True)
+    return dict(cfg, silent=True)
+
+
+def show_silently(cfg, room, text):
+    """Rule C: asks Sakamoto Eyes' hub to show her reply silently in `room` (its commands.jsonl,
+    next to voice-route.json: {"cmd": "silent_reply", "room", "text"}); its sign for a few words,
+    its board for more (the hub decides). One append, so a line is never split."""
+    path = os.path.join(os.path.dirname(os.path.expanduser(cfg.get('phone_route') or '')), 'commands.jsonl')
+    line = json.dumps({'cmd': 'silent_reply', 'room': room, 'text': text[:SILENT_TEXT_MAX]}, ensure_ascii=False) + '\n'
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND)     # the hub's file: never created here
+        try:
+            os.write(fd, line.encode('utf-8'))
+        finally:
+            os.close(fd)
+    except OSError as e:
+        log(f'silent reply for {room}: {e}')
+        return False
+    return True
+
+
+SILENT_TEXT_MAX = 8000      # the hub's board holds this much (Signboard.textMax)
 
 
 def target_name(target):
@@ -883,13 +979,13 @@ def touch(path):
 
 
 def nothing_to_say(text):
-    """A response that is only an ellipsis or an emoji or two, after an optional time ("08:31 …",
-    "08:31 🦉"). Emoji count as people see them: a sequence joined by zero-width joiners
+    """A response that is only her time sign-off ("08:31": John, 2026-10-17 15:35, it makes no
+    sound in any mode), or that and an ellipsis or an emoji or two ("08:31 …", "08:31 🦉"). Emoji count as people see them: a sequence joined by zero-width joiners
     ("👩🏻‍🔬", "🧜🏻‍♀️") is one, and so is a flag. Up to three, plus Sakamoto Eyes' avatar escape (her
     avatar before an emoji, "👩🏻‍🔬🧜🏻‍♀️": she becomes a mermaid), which shows on a phone and says
     nothing either."""
     rest = re.sub(r'^\s*\d{1,2}:\d{2}', '', text).strip()
-    if rest in ('…', '...'):
+    if rest in ('', '…', '...'):
         return True
     units = emoji_units(rest)
     if units is None:
@@ -1620,6 +1716,20 @@ def speak(path, prompted=True, turn=None):
     raw = text
     turn = turn or ('typed' if prompted else 'notice')
     cfg = routed(config(), turn)
+    if cfg.get('silent_in') or cfg.get('silent'):
+        # John, 2026-10-17 15:24: a muted room hears her nowhere; its own screens show the reply.
+        if cfg.get('silent_in'):
+            room = cfg['silent_in']
+            shown = show_silently(cfg, room, raw)
+            log(f'voice route ({turn}): {room} is muted; silent everywhere'
+                + ('; shown there' if shown else ''))
+        else:
+            log(f'voice route ({turn}): every room is muted or set not to speak; silent')
+        try:
+            os.remove(PIDFILE)
+        except OSError:
+            pass
+        return
     if cfg.get('targets') and cfg.get('output') in PHONE_OUTPUTS:
         log(f'voice route ({turn}): ' + ', '.join(map(target_name, cfg['targets'])))
     elif cfg.get('on_mac'):
