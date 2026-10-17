@@ -662,7 +662,9 @@ from reaching it; for a local try, set `"phone": "127.0.0.1:47811"` in the confi
 
 ## License and affiliation
 
-MIT; see [LICENSE](LICENSE). A Pragmaphilia Labs project.
+MIT; see [LICENSE](LICENSE). A Pragmaphilia Labs project. It bundles no third-party code; what it
+relies on (Python's standard library, Node's built-ins, Apple's frameworks and voices) is listed in
+[ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
 
 Sakamoto Voice is an independent project. It is not affiliated with, endorsed by, or supported by
 Anthropic. "Claude" and "Claude Code" are Anthropic's names for its products, used here only to say
