@@ -5,7 +5,7 @@
 The settings, the pid file, and the log go to a temporary folder, never ~/.config. The tests
 with a stand-in phone use the loopback interface and are skipped where they can't listen.
 """
-import base64, io, json, os, socket, sys, tempfile, threading, time, unittest, wave
+import base64, io, json, os, re, socket, sys, tempfile, threading, time, unittest, wave
 from contextlib import redirect_stdout
 from unittest import mock
 
@@ -2172,6 +2172,51 @@ class Notices(unittest.TestCase):
         self.assertTrue(speak.is_notice('  <system-reminder>hi'))
         self.assertFalse(speak.is_notice('Okay, try it now.'))
         self.assertFalse(speak.is_notice('I love <b>tags</b>'))
+
+
+
+class StartLatency(Isolated):
+    """John, 2026-10-18: the wait for the play button is one of the biggest latencies left. Nothing
+    before the click may sleep or wait on the voice lookup, and the page is watched closely."""
+
+    def test_app_read_does_not_sleep_by_default(self):
+        done = mock.Mock(returncode=0, stdout='clicked', stderr='')
+        with mock.patch.object(speak.shutil, 'which', return_value='/usr/local/bin/node'), \
+             mock.patch.object(speak.subprocess, 'run', return_value=done), \
+             mock.patch.object(speak.time, 'sleep') as sleep:
+            self.assertTrue(speak.app_read('06:40 The relay is on.'))
+        sleep.assert_not_called()
+        self.assertEqual(speak.APP_READ_DELAY, 0)
+
+    def test_the_voice_lookup_runs_in_the_background(self):
+        gate = threading.Event()
+        started = threading.Event()
+
+        def slow():
+            started.set()
+            gate.wait(5)
+            return {'Kyoko', 'Samantha'}
+        with mock.patch.object(speak, 'installed_voices', side_effect=slow):
+            voices = speak.LazyVoices()          # returns at once, though the lookup is blocked
+            self.assertTrue(started.wait(2))
+            gate.set()
+            self.assertIn('Kyoko', voices)
+            self.assertNotIn('Alex', voices)
+            self.assertEqual(len(voices), 2)
+            self.assertEqual(set(voices), {'Kyoko', 'Samantha'})
+
+    def test_a_failed_voice_lookup_means_no_voices(self):
+        with mock.patch.object(speak, 'installed_voices', side_effect=RuntimeError('boom')):
+            self.assertEqual(len(speak.LazyVoices()), 0)
+
+    def test_the_page_is_watched_closely(self):
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'app-read.mjs')
+        with open(here, encoding='utf-8') as f:
+            source = f.read()
+        self.assertIn('new MutationObserver', source)
+        poll = int(re.search(r'const POLL_MS = (\d+);', source).group(1))
+        self.assertLessEqual(poll, 100)
+        self.assertNotIn('setTimeout(r, 500)', source)
 
 
 class VoiceRace(Isolated):

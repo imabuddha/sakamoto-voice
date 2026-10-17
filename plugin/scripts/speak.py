@@ -1200,13 +1200,15 @@ APP_READ_RETRY = 6.0      # then, when no message matched, this long again (the 
 APP_READ_AGAIN = ('no matching message', 'no Read aloud button')
 
 
-def app_read(text, delay=0.5):
+def app_read(text, delay=0.0):
     """Presses Read aloud on this response (the raw text) in the Claude app; True when it clicked.
-    app-read.mjs waits for the page to draw the response's button, so the delay is only a head start.
+    app-read.mjs waits for the page to draw the response's button, so the delay is only a head start
+    (none by default: it looks at once, then as the page changes).
     When it found no matching message (or no button at all) in its APP_READ_WAIT, it looks again for
     APP_READ_RETRY before giving up (2026-10-14 06:25: after a tool-heavy turn, the reply's message
     wasn't there yet, and the phone's own voice read it)."""
-    time.sleep(delay)
+    if delay > 0:
+        time.sleep(delay)
     node = shutil.which('node') or next((p for p in ('/opt/homebrew/bin/node', '/usr/local/bin/node')
                                           if os.path.exists(p)), None)
     if not node:
@@ -1244,7 +1246,8 @@ def app_read(text, delay=0.5):
 # tool and wait for "ready"; press Read aloud; pass the tool's audio on to the phone until the tool
 # exits, once the app has been quiet for a moment (status 6: no sound came); then close.
 
-APP_READ_DELAY = 0.5      # seconds from the Stop hook to looking for Read aloud (app-read.mjs waits for it)
+APP_READ_DELAY = 0.0      # seconds from the Stop hook to looking for Read aloud (app-read.mjs waits for it; was 0.5
+                          # until 2026-10-18: a head start the polling made pointless)
 TAP_WAIT_START = 20       # seconds the tap waits for the app's voice after "ready" (app_read may look
                           # for the button APP_READ_WAIT + APP_READ_RETRY, and the voice takes READ_LEAD)
 TAP_MAX_SECONDS = 900     # the longest reading streamed (max_chars of 6000 is about 7 minutes)
@@ -1775,6 +1778,37 @@ def mac_says(cfg, raw, chunks, voices):
             note.close()
 
 
+class LazyVoices:
+    """The installed voices, looked up (`say -v ?`, about half a second) in a background thread
+    started now, so the Read aloud click doesn't wait for it; only the Mac's own voices need the
+    answer, and asking for it blocks until it is in. Acts as a read-only set."""
+
+    def __init__(self):
+        self._voices = None
+        self._thread = threading.Thread(target=self._look, daemon=True)
+        self._thread.start()
+
+    def _look(self):
+        try:
+            self._voices = installed_voices()
+        except Exception as e:     # a failed lookup means no known voices, not a failed response
+            log(f'voices: {e}')
+            self._voices = set()
+
+    def _set(self):
+        self._thread.join()
+        return self._voices
+
+    def __contains__(self, item):
+        return item in self._set()
+
+    def __iter__(self):
+        return iter(self._set())
+
+    def __len__(self):
+        return len(self._set())
+
+
 def installed_voices():
     try:
         out = subprocess.run(['say', '-v', '?'], capture_output=True, text=True).stdout
@@ -1825,7 +1859,7 @@ def speak(path, prompted=True, turn=None):
         log(f'voice route ({turn}): ' + ', '.join(map(target_name, cfg['targets'])))
     elif cfg.get('on_mac'):
         log(f'voice route ({turn}): the Mac ({cfg["output"]})')
-    voices = installed_voices()
+    voices = LazyVoices()
     limit = int(cfg.get('max_chars') or 0)
     if limit and len(text) > limit:
         text = text[:limit].rsplit(' ', 1)[0] + '. The rest is on screen.'

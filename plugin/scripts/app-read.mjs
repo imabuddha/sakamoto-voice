@@ -5,8 +5,8 @@
 //
 // key: the response's letters and digits, lowercased (speak.py's read_key): only the button of the
 // message whose text contains it is pressed, so an earlier response is never read by mistake. The
-// page may not have drawn the new response's button yet, so it looks again every half second for up
-// to wait_ms (WAIT_MS by default; speak.py looks again for a few seconds more when the first look
+// page may not have drawn the new response's button yet, so it looks again as soon as the page's
+// elements change (a MutationObserver) and at least every POLL_MS, for up to wait_ms (WAIT_MS by default; speak.py looks again for a few seconds more when the first look
 // found no matching message). A pressed button is marked and never pressed again. Without a key, the
 // last unmarked button is pressed.
 //
@@ -17,6 +17,7 @@ import { norm, messageText, findKey } from './app-read-match.mjs';
 const port = process.argv[2] || '9229';
 const key = process.argv[3] || '';
 const WAIT_MS = Number(process.argv[4]) > 0 ? Number(process.argv[4]) : 8000;
+const POLL_MS = 50;         // longest pause between looks (an observer wakes it sooner when the page changes)
 const EARLIER_TEXT = 12;    // letters and digits allowed before the reply (a label at most, not a message)
 const matchCode = `const norm = ${norm}; const messageText = ${messageText}; const findKey = ${findKey};`;
 
@@ -24,6 +25,7 @@ const matchCode = `const norm = ${norm}; const messageText = ${messageText}; con
 const inPage = `(async () => {
   const key = ${JSON.stringify(key)};
   const EARLIER_TEXT = ${EARLIER_TEXT};
+  const POLL_MS = ${POLL_MS};
   ${matchCode}
   const label = 'button[aria-label="Read aloud"]';
   // The message a button belongs to: its largest ancestor holding no other Read aloud button.
@@ -34,6 +36,15 @@ const inPage = `(async () => {
   };
   const end = Date.now() + ${WAIT_MS};
   let why = 'no Read aloud button';
+  // Sleeps up to POLL_MS, or until the page's elements change (a new message or button).
+  let wake = null;
+  const observer = new MutationObserver(() => { if (wake) wake(); });
+  observer.observe(document.body, { childList: true, subtree: true });
+  const pause = () => new Promise((r) => {
+    const timer = setTimeout(() => { wake = null; r(); }, POLL_MS);
+    wake = () => { clearTimeout(timer); wake = null; setTimeout(r, 20); };
+  });
+  try {
   for (;;) {
     const buttons = [...document.querySelectorAll(label)].slice(-4).reverse();
     for (const button of buttons) {
@@ -73,8 +84,9 @@ const inPage = `(async () => {
       }
       return why;
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await pause();
   }
+  } finally { observer.disconnect(); }
 })()`;
 
 // Runs in the app's main process: finds the session page (the focused one when there are several).
