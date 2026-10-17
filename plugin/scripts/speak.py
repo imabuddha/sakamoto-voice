@@ -430,15 +430,17 @@ def everywhere(cfg, levels):
             return dict(cfg, silent=True)
         phones = [p for p in listed_phones(cfg) if same_room(p.get('room'), his)]
         mac_here = any(same_room(m, his) for m in levels['mac_rooms'])
-        return speakers(cfg, levels, phones, mac_here and not levels['mac_silent'])
+        return speakers(cfg, levels, phones, mac_here and not levels['mac_silent'], unlisted=not phones)
     phones = [p for p in listed_phones(cfg)
               if p.get('silent') is not True and not room_silent(levels, text_of(p.get('room'), ''))]
-    return speakers(cfg, levels, phones, not levels['mac_silent'])
+    return speakers(cfg, levels, phones, not levels['mac_silent'], unlisted=not listed_phones(cfg))
 
 
-def speakers(cfg, levels, phones, mac_ok):
+def speakers(cfg, levels, phones, mac_ok, unlisted=False):
     """The settings for her voice on `phones` and, when `mac_ok` and `output` has one, the Mac's
-    side (never with the Mac app among the targets: it plays there); `silent` when neither."""
+    side (never with the Mac app among the targets: it plays there); `silent` when neither.
+    `unlisted`: the hub lists no phone where she may speak (not one that is muted), so "app-phone"
+    plays as the Mac app."""
     targets = []
     for p in phones:
         target = dict(p, fallback=text_of(p.get('fallback'), 'any'))
@@ -447,7 +449,10 @@ def speakers(cfg, levels, phones, mac_ok):
         targets.append(target)
     output = cfg.get('output') if cfg.get('output') in OUTPUTS else 'mac'
     phone = output in PHONE_OUTPUTS and bool(targets)
-    mac = output in ('mac', 'both', 'app', 'app-both') and mac_ok \
+    # No phone to carry her voice (the Mac app's room, say, which the hub lists as a phone only
+    # while it plays): the Mac app on the Mac's own speakers ("app-phone" says the app, not only phones), never silence in a room that
+    # may hear her (2026-10-18 04:16 and 04:38: "app-phone" and John in Labmac, no phone listed).
+    mac = (output in ('mac', 'both', 'app', 'app-both') or (output == 'app-phone' and unlisted and not targets)) and mac_ok \
         and not any(t.get('mac_fallback') for t in targets)
     if phone and mac:
         return dict(cfg, output=output, targets=targets)

@@ -1907,6 +1907,24 @@ class VoiceRulesFollowUp(SpeakerTests):
         routed = speak.routed(self.cfg(path, 'both'), 'typed')
         self.assertEqual(([t['name'] for t in routed['targets']], routed['output']), (['Lab XS'], 'both'))
 
+    def test_unelicited_replies_follow_him_to_the_mac_app_room_with_no_phone_listed(self):
+        # speak.log 2026-10-18 04:16:00 (notice) and 04:38:15 (typed): output "app-phone", John
+        # in Labmac (the Mac app's room, Mac speakers there, normal level), no phone listed.
+        # The Mac's speakers have to play; it was silent.
+        self.heard_from('Labmac')
+        for his_room in ('Labmac', None):
+            path = self.write_hub(None, level='quiet', levels={'Labmac': 'normal', 'Nerdvana': 'normal'},
+                                  mac_rooms=['Lab', 'Labmac'], his_room=his_room, phones=[])
+            for turn in ('notice', 'typed'):
+                routed = speak.routed(self.cfg(path, 'app-phone'), turn)
+                self.assertFalse(routed.get('silent'), (his_room, turn))
+                self.assertTrue(routed.get('on_mac'), (his_room, turn))
+                self.assertEqual(routed['output'], 'app', (his_room, turn))
+        # Muted Labmac: still silence there.
+        path = self.write_hub(None, levels={'Labmac': 'mute'}, mac_rooms=['Labmac'], his_room='Labmac',
+                              mac_silent=True, phones=[])
+        self.assertTrue(speak.routed(self.cfg(path, 'app-phone'), 'typed').get('silent'))
+
     def test_her_time_after_an_emoji_makes_no_sound(self):
         with mock.patch.object(speak, 'launch') as launch, \
              mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'last_assistant_message': '👍\n13:40'}))), \
