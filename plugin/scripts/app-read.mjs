@@ -7,7 +7,9 @@
 // message whose text contains it is pressed, so an earlier response is never read by mistake. The
 // page may not have drawn the new response's button yet, so it looks again every POLL_MS, for up to
 // wait_ms (WAIT_MS by default; speak.py looks again for a few seconds more when the first look
-// found no matching message). The pauses run here, in the app's main process, and each look is one
+// found no matching message). When the reply is drawn but the app holds its Read aloud button back (it
+// adds it only at the next prompt while background tasks run: see inPage), it gives up after
+// BUSY_GRACE_MS instead, and says so. The pauses run here, in the app's main process, and each look is one
 // synchronous call into the page: a hidden page's own timers are throttled to a crawl (see
 // watchPage). A pressed button is marked and never pressed again. Without a key, the last
 // unmarked button is pressed.
@@ -21,6 +23,7 @@ const key = process.argv[3] || '';
 const WAIT_MS = Number(process.argv[4]) > 0 ? Number(process.argv[4]) : 8000;
 const POLL_MS = 50;         // pause between looks, taken in the main process (the page's timers may be throttled)
 const EARLIER_TEXT = 12;    // letters and digits allowed before the reply (a label at most, not a message)
+const BUSY_GRACE_MS = 2500; // when the reply is drawn but its button is held back (see inPage), give up this soon
 const matchCode = `const norm = ${norm}; const stripStatus = ${stripStatus}; const messageText = ${messageText}; const findKey = ${findKey};`;
 
 // Runs in the page, once and at once (no timers, no observers: a hidden page throttles them, and
@@ -29,6 +32,7 @@ const matchCode = `const norm = ${norm}; const stripStatus = ${stripStatus}; con
 const inPage = `(() => {
   const key = ${JSON.stringify(key)};
   const EARLIER_TEXT = ${EARLIER_TEXT};
+  const BUSY_GRACE_MS = ${BUSY_GRACE_MS};
   ${matchCode}
   const label = 'button[aria-label="Read aloud"]';
   // The message a button belongs to. The app marks each reply as data-testid="assistant-message"
@@ -80,6 +84,25 @@ const inPage = `(() => {
     button.dataset.sakamotoRead = text.slice(0, 80);
     button.click();
     return { done: 'clicked' + (key ? ' (at ' + at + ' of ' + text.length + ')' : '') };
+  }
+  // The reply may be drawn with no button at all. Measured 2026-10-18 (after the app's layout update),
+  // while background tasks ran (the app's Stop button stayed shown): a finished reply is drawn at once
+  // as a "live" message (data-busy), then, a few seconds on, as an ordinary one, but either way
+  // without its actions toolbar, so without Read aloud; the toolbar comes only when the next prompt
+  // arrives: 11 of 11 times within 1 s of the next UserPromptSubmit, 2 to 23 s after the text. So
+  // waiting is useless: say so, and let the caller give up soon (the first pass above found only the
+  // previous reply's button: "no matching message", for the whole wait).
+  if (key) {
+    for (const message of [...document.querySelectorAll('[data-testid="assistant-message"]')].slice(-2).reverse()) {
+      if (message.querySelector(label)) continue;     // looked at above
+      const content = contentOf(message);
+      const text = messageText(content.full, content.code).replace(/^clauderesponded/, '');
+      if (!text || findKey(text, key) < 0) continue;
+      const stop = document.querySelector('button[aria-label^="Stop"]');
+      return { why: 'reply drawn without Read aloud: the app keeps its toolbar back' +
+        (message.hasAttribute('data-busy') ? ' (live)' : '') +
+        (stop ? ' (Stop button shown: "' + stop.getAttribute('aria-label') + '")' : ''), grace: BUSY_GRACE_MS };
+    }
   }
   return { why };
 })()`;

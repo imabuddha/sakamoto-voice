@@ -61,15 +61,22 @@ export function findKey(text, key, slack = 24) {
 // in the page looked once or twice and then hung past app-read's own limit ("app: timeout").
 // executeJavaScript itself answers at once in a hidden page, and the main process's timers are not
 // throttled, so the pauses are here and each look is one synchronous call into the page.
-// `look` returns { done } or { why }; it is called at least once, so waitMs can never end the
-// search before the page has been seen.
+// `look` returns { done } or { why }, and { why, grace } when the reply is on the page but the app
+// holds its button back: the search then ends `grace` ms after that first look, if sooner (the
+// button comes at the app's next prompt, not as the page settles: see app-read.mjs). It is called at
+// least once, so waitMs can never end the search before the page has been seen.
 export async function watchPage(look, waitMs, pollMs, fallback = 'no Read aloud button') {
-  const end = Date.now() + waitMs;
+  let end = Date.now() + waitMs;
   let why = fallback;
+  let graced = false;
   for (;;) {
     const seen = (await look()) || {};
     if (seen.done) return seen.done;
     if (seen.why) why = seen.why;
+    if (seen.grace >= 0 && !graced) {
+      graced = true;
+      end = Math.min(end, Date.now() + seen.grace);
+    }
     if (Date.now() >= end) return why;
     await new Promise((r) => setTimeout(r, pollMs));
   }

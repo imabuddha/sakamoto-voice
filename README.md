@@ -469,7 +469,14 @@ session page is often "hidden" to Chromium (another window in front, or the app'
 a hidden page throttles its own timers to a second or worse, which once made the lookup hang and
 time out on almost every reply. A hidden page (a locked screen, for one) also stops drawing new
 replies, so the lookup first turns off the page's background throttling, which keeps it visible
-until the app restarts. It marks each button it presses, so an earlier response is never read by
+until the app restarts. One more case, measured on 2026-10-18 after the app's layout update: while
+background tasks (agents, monitors) run and the app's Stop button stays shown, it draws a finished
+reply at once but holds back the message's toolbar, and with it Read aloud, until the next prompt
+arrives, seconds to minutes later (11 of 11 times within a second of the next prompt). The lookup
+sees the reply (no button yet), gives up after 2.5 s instead of 14 s, and says "reply drawn without
+Read aloud" in `speak.log`; the phone's or the Mac's own voices read it. (Not yet measured: whether
+a session with no background work gets the button with the reply under the new layout; before the
+update it did.) It marks each button it presses, so an earlier response is never read by
 mistake. A button reads its whole block, and a reply that follows a notice rather than a new
 message can share a block with the reply before it; when the response starts well into its block,
 the button isn't pressed, and the Mac's or the phone's voices read just the new response. That

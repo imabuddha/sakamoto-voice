@@ -2277,6 +2277,67 @@ class StartLatency(Isolated):
         self.assertEqual(refused[:2], ['earlier text first (40 chars)', 1])
         self.assertEqual(once[:2], ['no Read aloud button', 1])         # even with no time to wait, one look
 
+    def test_watch_page_gives_up_soon_when_the_app_holds_the_button_back(self):
+        """2026-10-18 13:15-13:20: the reply was drawn at once, but while background tasks ran the app
+        added its toolbar (Read aloud) only when the next prompt arrived, 2 to 23 s later, 11 of 11 times.
+        A look that says { why, grace } ends the search `grace` ms later instead of after the whole wait."""
+        import shutil
+        import subprocess
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node not found')
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'app-read-match.mjs')
+        code = (f'import {{ watchPage }} from {json.dumps(os.path.abspath(here))};\n'
+                'const run = async (answers, wait, poll) => {\n'
+                '  let looks = 0;\n'
+                '  const t = Date.now();\n'
+                '  const out = await watchPage(async () => answers[Math.min(looks++, answers.length - 1)], wait, poll);\n'
+                '  return [out, looks, Date.now() - t];\n'
+                '};\n'
+                'const held = { why: "reply drawn without Read aloud: the app keeps its toolbar back", grace: 300 };\n'
+                'const results = [\n'
+                '  await run([held], 5000, 20),\n'
+                '  await run([{ why: "no matching message; the newest holds 3 chars: abc" }, held], 5000, 20),\n'
+                '  await run([held, {}, { done: "clicked (at 0 of 9)" }], 5000, 20),\n'
+                '  await run([held], 100, 20),\n'
+                '];\n'
+                'console.log(JSON.stringify(results));\n')
+        out = subprocess.run([node, '--input-type=module', '-e', code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        alone, after_none, clicked, short_wait = json.loads(out.stdout)
+        self.assertTrue(alone[0].startswith('reply drawn without Read aloud'))
+        self.assertGreaterEqual(alone[2], 290)                          # the grace, not zero
+        self.assertLess(alone[2], 1500)                                 # and not the 5 s wait
+        self.assertGreater(alone[1], 3)                                 # polled meanwhile
+        self.assertTrue(after_none[0].startswith('reply drawn without Read aloud'))
+        self.assertLess(after_none[2], 1500)
+        self.assertEqual(clicked[:2], ['clicked (at 0 of 9)', 3])       # a button that comes in time is still pressed
+        self.assertLess(short_wait[2], 250)                             # never longer than the wait itself
+
+    def test_app_read_reports_a_reply_whose_button_is_held_back(self):
+        """Source guard: the page code checks the assistant messages that have no Read aloud button for
+        the reply, and calls a live ("busy") one held back, with a short grace."""
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'app-read.mjs')
+        with open(here, encoding='utf-8') as f:
+            source = f.read()
+        page = source[source.index('const inPage = `'):source.index('const expression = `')]
+        for needle in ('data-busy', 'reply drawn without Read aloud', 'grace: BUSY_GRACE_MS'):
+            self.assertIn(needle, page)
+        grace = int(re.search(r'const BUSY_GRACE_MS = (\d+);', source).group(1))
+        self.assertLessEqual(grace, 5000)
+        # Not a reason app_read looks again for: waiting won't bring the button.
+        self.assertFalse('reply drawn without Read aloud'.startswith(speak.APP_READ_AGAIN))
+
+    def test_a_held_back_reply_falls_back_after_one_look(self):
+        said = 'reply drawn without Read aloud: the app keeps its toolbar back (Stop button shown: "Stop this task")'
+        results = [mock.Mock(returncode=1, stdout=said, stderr='')]
+        with mock.patch.object(speak.shutil, 'which', return_value='/usr/local/bin/node'), \
+             mock.patch.object(speak.subprocess, 'run', side_effect=results) as run:
+            self.assertFalse(speak.app_read('13:15 The fix is live.', delay=0))
+        self.assertEqual(run.call_count, 1)
+        with open(speak.LOG, encoding='utf-8') as f:
+            self.assertIn('app: reply drawn without Read aloud', f.read())
+
 
 class VoiceRace(Isolated):
     """2026-10-14 06:25 and 14:35: "app: no matching message; the newest holds …", then the phone's
