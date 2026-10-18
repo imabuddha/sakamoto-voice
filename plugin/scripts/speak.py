@@ -49,7 +49,15 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
             In both, the phone has the last word (its Claude's Voice setting, 1.0 and later): while
             it wants the text (phone_voice), the Mac sends the text and streams nothing, and
             app-both has the app read on the Mac alone.
+  app_voice true (the default) or false. True: while the app's debugger is on, the app's voice is
+            asked for directly, without its button (app-voice.mjs: Read aloud's own text-to-speech
+            WebSocket, opened in the claude.ai session page; a private endpoint that may change),
+            for "app" (played on the Mac with ffmpeg), "app-phone" and "app-both" (streamed, and
+            played on the Mac for app-both), and "phone" (her voice streamed to the phone, unless
+            it wants the text); when that fails, the button (or, for "phone", the text) as before.
   app_voice_tap  where app-voice-tap is, when it's not in ~/.local/bin or on the PATH.
+  ffmpeg    the ffmpeg that plays the app's voice on the Mac, when it's not on the PATH or in
+            /opt/homebrew/bin.
   phone_remote  another address for the phone, tried first: e.g. its Tailscale address
             ("100.x.y.z:47811"), so the phone is reached away from home too; when it fails, the
             local network as usual.
@@ -145,7 +153,8 @@ LOG_MAX = 64 * 1024          # then speak.log becomes speak.log.1, replacing the
 DEFAULTS = {'enabled': True, 'voice_en': '', 'voice_ja': 'Kyoko', 'default_lang': 'auto', 'rate': 0,
             'device': '', 'max_chars': 6000,
             'output': 'mac', 'phone_mode': 'text', 'phone_token': '', 'phone': '', 'phone_name': '',
-            'app_voice_tap': '', 'dev_path': '', 'phone_remote': '', 'phone_voice': '', 'phone_route': ''}
+            'app_voice_tap': '', 'dev_path': '', 'phone_remote': '', 'phone_voice': '', 'phone_route': '',
+            'app_voice': True}
 OUTPUTS = ('mac', 'phone', 'both', 'app', 'app-both', 'app-phone')
 PHONE_OUTPUTS = ('phone', 'both', 'app-both', 'app-phone')       # the outputs a stop also tells the phone
 PHONE_MODES = ('text', 'audio')
@@ -1200,6 +1209,12 @@ def note_app_reading(text, now=None):
         log(f'app-reading: {e}')
 
 
+def node_path():
+    """node, for app-read.mjs and app-voice.mjs: on the PATH, else Homebrew's or /usr/local's; None."""
+    return shutil.which('node') or next((p for p in ('/opt/homebrew/bin/node', '/usr/local/bin/node')
+                                         if os.path.exists(p)), None)
+
+
 APP_READ_WAIT = 8.0       # seconds app-read.mjs looks for the response's button
 APP_READ_RETRY = 6.0      # then, when no message matched, this long again (the page may still be drawing)
 APP_READ_AGAIN = ('no matching message', 'no Read aloud button')
@@ -1214,8 +1229,7 @@ def app_read(text, delay=0.0):
     wasn't there yet, and the phone's own voice read it)."""
     if delay > 0:
         time.sleep(delay)
-    node = shutil.which('node') or next((p for p in ('/opt/homebrew/bin/node', '/usr/local/bin/node')
-                                          if os.path.exists(p)), None)
+    node = node_path()
     if not node:
         log('app: node not found')
         return False
@@ -1249,7 +1263,9 @@ def app_read(text, delay=0.0):
 #
 # So: connect to the phone and send the stream's header (the phone answers at once); start the
 # tool and wait for "ready"; press Read aloud; pass the tool's audio on to the phone until the tool
-# exits, once the app has been quiet for a moment (status 6: no sound came); then close.
+# exits, once the app has been quiet for a moment (status 6: no sound came); then close. Since
+# 2026-10-18 the app's voice is first asked for directly (AppVoice, below), and the tap and the
+# button are the fallback.
 
 APP_READ_DELAY = 0.0      # seconds from the Stop hook to looking for Read aloud (app-read.mjs waits for it; was 0.5
                           # until 2026-10-18: a head start the polling made pointless)
@@ -1388,6 +1404,8 @@ class Tap:
     error. It stays in the speaker's process group, so stopping the speaker (a new response, or
     `speak.py stop`) stops it too, and it removes its tap as it exits; it also stops by itself
     when nobody reads its audio any more."""
+
+    name = 'app-voice-tap'
 
     def __init__(self, path, mute=True):
         self.proc = subprocess.Popen(
@@ -1553,6 +1571,137 @@ class Tap:
         return self.proc.returncode
 
 
+# ---- The Claude app's voice without its button (app-voice.mjs) ------------------------------
+#
+# Since the app's update of 2026-10-18, a reply's Read aloud button often appears only at the next
+# prompt (app-read.mjs), so the button can't be pressed when the reply is done. app-voice.mjs asks
+# for the same voice directly: through the app's Main Process Debugger, it opens Read aloud's own
+# text-to-speech WebSocket in the claude.ai session page (a private, undocumented endpoint of
+# claude.ai's, which may change or go away with any update), and writes the audio to its standard
+# output as app-voice-tap --stdout does: 16-bit mono PCM at STREAM_RATE, paced as it plays, with
+# "ready" on its standard error when the first audio has come, then one line saying what happened.
+# So AppVoice is a Tap, and its audio goes where the tap's would: to the phones (relay), and on the
+# Mac through MacPlayer (ffmpeg). Stopping the speaker stops it, and it closes the page's socket.
+
+APP_VOICE_PORT = 9229             # the app's Main Process Debugger (as for app-read.mjs)
+APP_VOICE_READY_TIMEOUT = 11      # seconds for its first audio (app-voice.mjs gives up after 8)
+
+
+def app_voice_script():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app-voice.mjs')
+
+
+def debugger_reachable(port=APP_VOICE_PORT, timeout=0.3):
+    """True when something listens on the app's debugger port (a quick look, before any stream opens)."""
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def app_voice_on(cfg):
+    """Whether to try the app's voice without its button: app_voice not off, node found, and the
+    debugger reachable. Logs why not when it was wanted."""
+    if cfg.get('app_voice') is False:
+        return False
+    if not node_path() or not os.path.isfile(app_voice_script()):
+        log('app voice: node or app-voice.mjs not found')
+        return False
+    if not debugger_reachable():
+        log("app voice: the Claude app's debugger is off")
+        return False
+    return True
+
+
+class AppVoice(Tap):
+    """app-voice.mjs reading `text`, as a Tap: its audio on standard output, its status lines on
+    standard error. In the speaker's process group, so stopping the speaker stops it (and it closes
+    the page's socket on the way out)."""
+
+    name = 'app-voice'
+
+    def __init__(self, text):
+        self.proc = subprocess.Popen(
+            [node_path() or 'node', app_voice_script(), '--port', str(APP_VOICE_PORT), '--rate', str(STREAM_RATE),
+             '--max-seconds', str(TAP_MAX_SECONDS)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.output = b''
+        self.sent = 0
+        try:
+            self.proc.stdin.write(text.encode('utf-8'))
+        except OSError:
+            pass        # it exited already: its standard error says why
+        finally:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+
+    def wait_ready(self, timeout=APP_VOICE_READY_TIMEOUT):
+        return super().wait_ready(timeout)
+
+
+def start_app_voice(text, who='app voice'):
+    """The app's voice reading `text`, once its first audio has come (AppVoice); None when
+    app-voice.mjs failed (logged, for the button's path, or the text, to take over). The caller has
+    checked app_voice_on()."""
+    if not text.strip():
+        return None
+    try:
+        voice = AppVoice(text)
+    except OSError as e:
+        log(f'{who}: app-voice.mjs did not start: {e}')
+        return None
+    if voice.wait_ready():
+        return voice
+    voice.stop(grace=0)
+    log(f'{who}: {voice.last_line()}')
+    return None
+
+
+class MacPlayer:
+    """ffmpeg playing the stream (16-bit mono PCM at STREAM_RATE) on the Mac's current output, fed
+    through a socket pair, so Tap.relay() treats it as one more phone. No window: a command-line
+    tool. In the speaker's process group, so stopping the speaker stops it."""
+
+    def __init__(self, cfg):
+        ffmpeg = cfg.get('ffmpeg') or shutil.which('ffmpeg') or next(
+            (p for p in ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg') if os.path.exists(p)), None)
+        if not ffmpeg:
+            raise OSError('ffmpeg not found')
+        self.sock, theirs = socket.socketpair()
+        try:
+            self.proc = subprocess.Popen(
+                [ffmpeg, '-hide_banner', '-loglevel', 'error', '-f', 's16le', '-ar', str(STREAM_RATE),
+                 '-ac', '1', '-i', 'pipe:0', '-f', 'audiotoolbox', '-'],
+                stdin=theirs, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except BaseException:
+            self.sock.close()
+            raise
+        finally:
+            theirs.close()
+        self.sock.settimeout(STREAM_SEND_TIMEOUT)
+
+    def finish(self, timeout=10.0):
+        """Lets it play what it has, then ends it (at once when `timeout` is 0)."""
+        try:
+            self.sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        self.sock.close()
+        try:
+            self.proc.wait(timeout=timeout if timeout else 0.01)
+        except subprocess.TimeoutExpired:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        return self.proc.returncode
+
+
 RECORDINGS = os.path.join(HOME, 'recordings')
 
 
@@ -1574,14 +1723,21 @@ def recording_path(text):
         return None
 
 
-def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
+def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False, button=True, synth=None):
     """The Claude app reads the response in its own voice, streamed live to the phone, with the
     Mac silent. Whenever that can't happen before the voice begins, the phone gets the text and
     speaks it in its own voices, so something is always heard; speak.log says why.
 
+    The voice comes from app-voice.mjs (start_app_voice: the app's text-to-speech service, asked
+    directly, for `text`) when the app's debugger is on (`synth`: app_voice_on() unless given);
+    failing that, from the Read aloud button, tapped (app-voice-tap and app_read). `button` False
+    (output phone): no button; when the app's voice can't be had, the phones get the response as
+    output phone sends it (deliver_to_phone, with the phone_mode set).
+
     both (output app-both): the Mac isn't muted, so the voice plays here and on the phone. Then a
     failure doesn't fall back here; it returns where things stopped, for the caller to choose:
-    'before-click' (nothing pressed yet), 'not-clicked', or 'no-sound'. None when it streamed.
+    'before-click' (nothing pressed yet), 'not-clicked', or 'no-sound'. None when it streamed. With
+    the app's voice from app-voice.mjs, the Mac plays it too (MacPlayer: ffmpeg).
     'mac' (not both): every target was Sakamoto Eyes' Mac app (`mac_fallback`) and none answered;
     the caller reads on the Mac's own speakers instead.
 
@@ -1596,6 +1752,12 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
         if both:
             log(f'app-both: {reason}')
             return stage
+        if not button:
+            to = targets if to is None else to
+            log(f'phone: {reason}; sending the response to ' + ', '.join(
+                target_name(t) if t else cfg.get('phone_name') or 'the phone' for t in to))
+            deliver_to_phone(dict(cfg, targets=[t for t in to if t]), text, runs, mac_runs, voices)
+            return None
         send_text(reason, targets if to is None else to)
 
     def send_text(reason, to):
@@ -1615,9 +1777,11 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
     if not token:
         log('app-phone: not paired (speak.py pair CODE)')
         return 'before-click' if both else None
-    path = tap_path(cfg)
-    if not path:
-        return fallback('app-voice-tap is not built (run mac/build.sh)')
+    synth = app_voice_on(cfg) if synth is None else synth
+    path = tap_path(cfg) if button else None
+    if not path and not synth:
+        return fallback('app-voice-tap is not built (run mac/build.sh)' if button
+                        else "the Claude app's voice is off (its debugger, or app_voice)")
     started = time.monotonic()
     header = stream_header(token, text)
     streams, no_answer, want_text, failures = [], [], [], []
@@ -1667,22 +1831,42 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
         for sock in socks:
             sock.close()
 
-    try:
-        tap = Tap(path, mute=not both)
-    except OSError as e:
+    who = 'app-both' if both else 'app-phone' if button else 'phone'
+    voice = start_app_voice(text, who) if synth else None
+    player = None
+    if voice and both:
+        try:
+            player = MacPlayer(cfg)     # the app's voice on the Mac too
+        except OSError as e:
+            log(f'app-both: no player on the Mac ({e}); the button instead')
+            voice.stop(grace=0)
+            voice = None
+    if voice:
+        tap = voice
+    elif not path:
         close_all()
-        return fallback(f'app-voice-tap did not start: {e}', to=streamed)
-    live = list(socks)     # the phones still streaming (relay takes out the ones that end)
+        return fallback("the Claude app's voice did not start" if not button
+                        else 'app-voice-tap is not built (run mac/build.sh)', to=streamed)
+    else:
+        try:
+            tap = Tap(path, mute=not both)
+        except OSError as e:
+            close_all()
+            return fallback(f'app-voice-tap did not start: {e}', to=streamed)
+    tool = getattr(tap, 'name', 'app-voice-tap')
+    # The phones still streaming, and the Mac's player (relay takes out the ones that end).
+    live = list(socks) + ([player.sock] if player else [])
     try:
-        if not tap.wait_ready():
-            tap.stop(grace=0)
-            close_all()
-            return fallback(f'app-voice-tap did not start: {tap.last_line()}', to=streamed)
-        if not app_read(raw, delay=max(0.0, APP_READ_DELAY - (time.monotonic() - started))):
-            tap.stop(grace=0)
-            close_all()
-            return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found", 'not-clicked',
-                            to=streamed)
+        if not voice:
+            if not tap.wait_ready():
+                tap.stop(grace=0)
+                close_all()
+                return fallback(f'app-voice-tap did not start: {tap.last_line()}', to=streamed)
+            if not app_read(raw, delay=max(0.0, APP_READ_DELAY - (time.monotonic() - started))):
+                tap.stop(grace=0)
+                close_all()
+                return fallback("the Claude app's debugger is off, or its Read aloud button wasn't found",
+                                'not-clicked', to=streamed)
         names = [target_name(t) if t else cfg.get('phone_name') or 'the phone' for t in streamed]
         cut = tap.relay(live if len(live) > 1 else live[0], timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30,
                         record=recording_path(raw), copy=voice_clock(cfg, raw, mac=both, phones=names),
@@ -1691,12 +1875,20 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
     except BaseException:
         tap.stop(grace=0)
         close_all()
+        if player:
+            player.finish(0)
         raise
+    if player and player.sock in live:
+        live.remove(player.sock)
     if cut:
         close_all()
-        log(f'app-phone: {cut}, after {tap.seconds:.1f} s; app-voice-tap: {tap.last_line()}')
+        if player:
+            player.finish(0)
+        log(f'{who}: {cut}, after {tap.seconds:.1f} s; {tool}: {tap.last_line()}')
     elif status == TAP_NO_SOUND:
         close_all()
+        if player:
+            player.finish(0)
         return fallback(f'no sound from the Claude app ({tap.last_line()})', 'no-sound', to=streamed)
     else:
         for sock in socks:
@@ -1704,11 +1896,52 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False):
                 end_stream(sock)
             else:
                 sock.close()
+        if player:
+            player.finish()
         phones = '' if len(socks) == 1 else f' ({len(live)} of {len(socks)} phones)'
+        mac = ' and the Mac' if player else ''
         if status == 0:
-            log(f'app-phone: {tap.seconds:.1f} s to the phone{phones}; app-voice-tap: {tap.last_line()}')
+            log(f'{who}: {tap.seconds:.1f} s to the phone{phones}{mac}; {tool}: {tap.last_line()}')
         else:
-            log(f'app-phone: app-voice-tap stopped with status {status}: {tap.last_line()}')
+            log(f'{who}: {tool} stopped with status {status}: {tap.last_line()}')
+
+
+def app_voice_here(cfg, raw, text):
+    """The Claude app's voice for `text` on the Mac alone, without its button (app-voice.mjs,
+    played by MacPlayer). Returns None when it can't start (logged why: the caller presses the
+    button instead, app_read_here), else a function that plays it to its end (the speaker stays
+    alive meanwhile, as for `say`). Under Sakamoto Eyes, the hub gets a copy as it plays (P2.8)."""
+    if not text.strip() or not app_voice_on(cfg):
+        return None
+    voice = start_app_voice(text, 'app (Mac)')
+    if not voice:
+        return None
+    try:
+        player = MacPlayer(cfg)
+    except OSError as e:
+        log(f'app (Mac): no player ({e}); the button instead')
+        voice.stop(grace=0)
+        return None
+
+    def follow():
+        try:
+            cut = voice.relay(player.sock, timeout=TAP_MAX_SECONDS + TAP_WAIT_START + 30, record=recording_path(raw),
+                              copy=voice_clock(cfg, raw, mac=True), limit=babble_limit(raw, cfg))
+            status = voice.stop(grace=0 if cut else 3.0)
+        except BaseException:
+            voice.stop(grace=0)
+            player.finish(0)
+            raise
+        player.finish(0 if cut else 10.0)
+        log(f'app (Mac): {voice.seconds:.1f} s' + (f' ({cut})' if cut else '' if status == 0 else f'; status {status}')
+            + f'; app-voice: {voice.last_line()}')
+    return follow
+
+
+def app_here(cfg, raw, text):
+    """The Claude app's voice on the Mac alone: without its button when it can (app_voice_here),
+    else by pressing it (app_read_here). None when neither started; else the function to follow it."""
+    return app_voice_here(cfg, raw, text) or app_read_here(cfg, raw)
 
 
 def app_read_here(cfg, raw, delay=APP_READ_DELAY):
@@ -1874,9 +2107,9 @@ def speak(path, prompted=True, turn=None):
         # After a notice the response may share a block with the one before; app-read presses the
         # button only when this response starts its block, so the app's voice is still tried.
         log('app: a response without a new prompt; the app reads it only if it starts its block')
-    follow = None       # the app's voice on the Mac alone, followed to its end (app_read_here)
+    follow = None       # the app's voice on the Mac alone, followed to its end (app_here)
     if output == 'app':
-        follow = app_read_here(cfg, raw)
+        follow = app_here(cfg, raw, text)
         output = None if follow else 'mac'   # the app's own voice, else the Mac's
     elif output == 'app-both':
         # The app's voice here and streamed to the phone; failing that, as much of it as can be had.
@@ -1886,7 +2119,7 @@ def speak(path, prompted=True, turn=None):
         else:
             stage = app_phone(cfg, raw, text, phone_runs, chunks, voices, both=True) if chunks else 'before-click'
         if stage == 'before-click':     # the app's voice here, the text to the phone
-            follow = app_read_here(cfg, raw)
+            follow = app_here(cfg, raw, text)
             output = 'phone' if follow else 'both'
         else:                           # the app didn't speak: the Mac's voices and the text
             output = 'both' if stage else None
@@ -1896,10 +2129,21 @@ def speak(path, prompted=True, turn=None):
             deliver_to_phone(dict(cfg, phone_mode='text'), text, phone_runs, chunks, voices)
         elif chunks and app_phone(cfg, raw, text, phone_runs, chunks, voices) == 'mac':
             # The Mac app didn't answer: the app's voice on the Mac itself, else the Mac's.
-            follow = app_read_here(cfg, raw)
+            follow = app_here(cfg, raw, text)
             output = None if follow else 'mac'
         if output == 'app-phone':
             output = None       # the app's voice on the phone, else text there (app_phone)
+    elif output == 'phone' and chunks and cfg.get('phone_voice') != 'text' and cfg.get('phone_token') \
+            and app_voice_on(cfg):
+        # Her own voice (the Claude app's, app-voice.mjs) streamed to the phone while the app's
+        # debugger is on; else the response as output phone sends it (app_phone, button=False).
+        if app_phone(cfg, raw, text, phone_runs, chunks, voices, button=False, synth=True) == 'mac':
+            # The Mac app didn't answer: her voice on the Mac itself (never the button: this is
+            # output phone), else the Mac's own voices.
+            follow = app_voice_here(cfg, raw, text)
+            output = None if follow else 'mac'
+        else:
+            output = None
     phone = None
     if chunks and output in ('phone', 'both'):
         # Alongside the Mac's own speech, so both start together.

@@ -12,6 +12,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 import speak  # noqa: E402
 
+REAL_APP_VOICE_ON = speak.app_voice_on      # Isolated stands it in; AppVoiceTests checks the real one
+
 BROWSE = """Browsing for _sakamotovoice._tcp.local.
 DATE: ---Mon 12 Oct 2026---
 11:40:52.806  ...STARTING...
@@ -46,6 +48,11 @@ class Isolated(unittest.TestCase):
             p = mock.patch.object(speak, name, value)
             p.start()
             self.addCleanup(p.stop)
+        # Never the real app's voice (its debugger may well be on, on this Mac): the tests that
+        # want it say so (AppVoiceTests).
+        p = mock.patch.object(speak, 'app_voice_on', return_value=False)
+        p.start()
+        self.addCleanup(p.stop)
         self.addCleanup(self.dir.cleanup)
 
     def write_config(self, cfg):
@@ -898,7 +905,7 @@ class FakeTap:
     def relay(self, sock, timeout, record=None, copy=None, limit=None):
         self.record = record
         self.limit = limit
-        self.relayed = sock
+        self.relayed = list(sock) if isinstance(sock, list) else sock    # as it was given (the caller edits its list)
         return self.cut
 
     def stop(self, grace=3.0):
@@ -2614,3 +2621,432 @@ class MacVoiceForTheHub(FakeToolCase):
             speak.speak(path)
         run.assert_not_called()
         self.assertEqual(order, ['followed'])
+
+
+# ---- The app's voice without its button (app-voice.mjs) --------------------------------------
+
+FAKE_APP_VOICE = r'''#!/bin/sh
+# A stand-in for `node app-voice.mjs`: records its arguments and the text on its standard input,
+# then acts out $MODE as app-voice.mjs would.
+printf '%s\n' "$@" > "$DIR/voice-args"
+cat > "$DIR/voice-text"
+case "$MODE" in
+  ok)   echo ready >&2; cat "$DIR/audio"; echo "read: 1.0 s of audio, first audio after 1.1 s; buttery at 1.20" >&2; exit 0 ;;
+  off)  echo "debugger not reachable (ECONNREFUSED)" >&2; exit 2 ;;
+  deaf) echo "no sound after 8 s (buttery at 1.20, 1 piece; events: none)" >&2; exit 6 ;;
+esac
+'''
+
+
+class AppVoiceTests(FakeToolCase):
+    """AppVoice (app-voice.mjs as a Tap), with a shell script standing in for node."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake = os.path.join(self.dir.name, 'fake-node')
+        with open(self.fake, 'w') as f:
+            f.write(FAKE_APP_VOICE)
+        os.chmod(self.fake, 0o755)
+        p = mock.patch.object(speak, 'node_path', return_value=self.fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def voice(self, mode, text='Hello 囲碁'):
+        with self.mode(mode):
+            voice = speak.AppVoice(text)
+        self.addCleanup(lambda: voice.proc.poll() is None and voice.proc.kill())
+        return voice
+
+    def test_the_text_goes_in_and_the_audio_comes_out(self):
+        voice = self.voice('ok')
+        self.assertTrue(voice.wait_ready(timeout=5))
+        mine, phone = socket.socketpair()
+        received = bytearray()
+        reader = drain(phone, received)
+        self.assertIsNone(voice.relay(mine, timeout=10))
+        self.assertEqual(voice.stop(), 0)
+        speak.end_stream(mine)
+        reader.join(5)
+        self.assertEqual(bytes(received), AUDIO)
+        self.assertEqual(self.read('voice-text'), 'Hello 囲碁')
+        self.assertEqual(self.read('voice-args').split('\n')[:-1],
+                         [speak.app_voice_script(), '--port', '9229', '--rate', str(speak.STREAM_RATE),
+                          '--max-seconds', str(speak.TAP_MAX_SECONDS)])
+        self.assertTrue(voice.last_line().startswith('read: 1.0 s of audio'))
+        self.assertEqual(voice.name, 'app-voice')
+
+    def test_start_app_voice_returns_it_once_audio_comes(self):
+        with self.mode('ok'):
+            voice = speak.start_app_voice('Hello', 'app-phone')
+        self.addCleanup(lambda: voice.proc.poll() is None and voice.proc.kill())
+        self.assertIsInstance(voice, speak.AppVoice)
+        voice.stop(grace=0)
+
+    def test_start_app_voice_says_why_not(self):
+        for mode, why in (('off', 'debugger not reachable'), ('deaf', 'no sound after 8 s')):
+            with self.mode(mode):
+                self.assertIsNone(speak.start_app_voice('Hello', 'app-phone'))
+            self.assertIn(f'app-phone: {why}', self.log_text())
+        self.assertIsNone(speak.start_app_voice('  ', 'app-phone'))     # nothing to read: not started
+
+    def test_app_voice_on(self):
+        with mock.patch.object(speak, 'debugger_reachable', return_value=True):
+            self.assertTrue(REAL_APP_VOICE_ON({}))
+            self.assertFalse(REAL_APP_VOICE_ON({'app_voice': False}))
+        with mock.patch.object(speak, 'debugger_reachable', return_value=False):
+            self.assertFalse(REAL_APP_VOICE_ON({}))
+        self.assertIn("app voice: the Claude app's debugger is off", self.log_text())
+        with mock.patch.object(speak, 'node_path', return_value=None):
+            self.assertFalse(REAL_APP_VOICE_ON({}))
+        self.assertIn('app voice: node or app-voice.mjs not found', self.log_text())
+
+    def test_debugger_reachable(self):
+        try:
+            server = socket.socket()
+            server.bind(('127.0.0.1', 0))
+            server.listen(1)
+        except OSError as e:
+            self.skipTest(f'cannot listen: {e}')
+        port = server.getsockname()[1]
+        try:
+            self.assertTrue(speak.debugger_reachable(port))
+        finally:
+            server.close()
+        self.assertFalse(speak.debugger_reachable(port))
+
+
+FAKE_FFMPEG = r'''#!/bin/sh
+# A stand-in for ffmpeg: records its arguments and what it is given to play.
+printf '%s\n' "$@" > "$DIR/ffmpeg-args"
+cat > "$DIR/played"
+'''
+
+
+class MacPlayerTests(FakeToolCase):
+    def test_it_plays_what_it_is_sent(self):
+        fake = os.path.join(self.dir.name, 'ffmpeg')
+        with open(fake, 'w') as f:
+            f.write(FAKE_FFMPEG)
+        os.chmod(fake, 0o755)
+        with self.mode('ok'):
+            player = speak.MacPlayer({'ffmpeg': fake})
+        player.sock.sendall(AUDIO)
+        self.assertEqual(player.finish(), 0)
+        with open(os.path.join(self.dir.name, 'played'), 'rb') as f:
+            self.assertEqual(f.read(), AUDIO)
+        args = self.read('ffmpeg-args').split('\n')[:-1]
+        self.assertEqual(args[args.index('-ar') + 1], str(speak.STREAM_RATE))
+        self.assertEqual(args[-3:], ['-f', 'audiotoolbox', '-'])
+
+    def test_no_ffmpeg(self):
+        with mock.patch.object(speak.shutil, 'which', return_value=None), \
+             mock.patch.object(speak.os.path, 'exists', return_value=False):
+            with self.assertRaises(OSError):
+                speak.MacPlayer({})
+
+
+class FakePlayer:
+    """Stands in for speak.MacPlayer (calling it "starts" it)."""
+
+    def __init__(self):
+        self.sock = mock.Mock(name='player socket')
+        self.finished = None
+
+    def __call__(self, cfg):
+        return self
+
+    def finish(self, timeout=10.0):
+        self.finished = timeout
+        return 0
+
+
+class AppVoiceRoutes(AppPhoneTests):
+    """app_phone() with the app's voice from app-voice.mjs, and when it can't start."""
+
+    def test_app_phone_streams_the_app_voice_without_the_button(self):
+        voice = FakeTap(line='read: 3.2 s of audio')
+        voice.name = 'app-voice'
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'start_app_voice', return_value=voice) as start:
+            tap, _, click, deliver = self.run_app_phone()
+        start.assert_called_once_with('Hello 囲碁', 'app-phone')
+        click.assert_not_called()                   # no button
+        self.assertIsNone(tap.relayed)              # and no tap
+        self.assertIs(voice.relayed, self.sock)
+        self.end_stream.assert_called_once_with(self.sock)
+        deliver.assert_not_called()
+        self.assertIn('app-phone: 3.2 s to the phone; app-voice: read: 3.2 s of audio', self.log_text())
+
+    def test_app_phone_presses_the_button_when_the_app_voice_fails(self):
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'start_app_voice', return_value=None):
+            tap, _, click, deliver = self.run_app_phone()
+        click.assert_called_once()
+        self.assertIs(tap.relayed, self.sock)
+        deliver.assert_not_called()
+
+    def test_app_phone_needs_no_tap_for_the_app_voice(self):
+        voice = FakeTap()
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'start_app_voice', return_value=voice):
+            _, reach, _, _ = self.run_app_phone(path=None)
+        reach.assert_called()
+        self.assertIs(voice.relayed, self.sock)
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'start_app_voice', return_value=None):
+            _, _, click, deliver = self.run_app_phone(path=None)
+        click.assert_not_called()
+        self.sock.close.assert_called()
+        self.assert_text_fallback(deliver)
+        self.assertIn('app-voice-tap is not built', self.log_text())
+
+    def run_phone_output(self, started):
+        """app_phone as output phone calls it (button=False), the app's voice `started` or None."""
+        cfg = dict(self.CFG, output='phone', phone_mode='audio')
+        self.write_config(cfg)
+        with mock.patch.object(speak, 'tap_path', return_value='/bin/app-voice-tap'), \
+             mock.patch.object(speak, 'Tap', FakeTap()) as tap, \
+             mock.patch.object(speak, 'start_app_voice', return_value=started), \
+             mock.patch.object(speak, 'reach_phone', return_value=(mock.Mock(), {'ok': True})), \
+             mock.patch.object(speak, 'open_stream'), mock.patch.object(speak, 'end_stream'), \
+             mock.patch.object(speak, 'app_read', return_value=True) as click, \
+             mock.patch.object(speak, 'deliver_to_phone') as deliver:
+            result = speak.app_phone(cfg, 'Hi', 'Hi', [('default', 'Hi')], [('en', 'Hi')], set(),
+                                     button=False, synth=True)
+        self.assertIsNone(result)
+        click.assert_not_called()                   # never the button
+        self.assertIsNone(tap.relayed)
+        return deliver
+
+    def test_phone_output_streams_the_app_voice(self):
+        voice = FakeTap()
+        deliver = self.run_phone_output(voice)
+        self.assertIsNotNone(voice.relayed)
+        deliver.assert_not_called()
+
+    def test_phone_output_sends_the_response_as_before_when_the_app_voice_fails(self):
+        deliver = self.run_phone_output(None)
+        self.assertEqual(deliver.call_args[0][0]['phone_mode'], 'audio')     # as output phone would
+        self.assertIn("phone: the Claude app's voice did not start; sending the response to", self.log_text())
+
+    def test_app_both_plays_the_app_voice_on_the_mac_too(self):
+        voice = FakeTap()
+        player = FakePlayer()
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'start_app_voice', return_value=voice), \
+             mock.patch.object(speak, 'MacPlayer', player), \
+             mock.patch.object(speak, 'tap_path', return_value='/bin/app-voice-tap'), \
+             mock.patch.object(speak, 'Tap', FakeTap()) as tap, \
+             mock.patch.object(speak, 'reach_phone', return_value=(mock.Mock(), {'ok': True})), \
+             mock.patch.object(speak, 'open_stream'), mock.patch.object(speak, 'end_stream') as end, \
+             mock.patch.object(speak, 'app_read', return_value=True) as click:
+            cfg = dict(self.CFG, output='app-both')
+            self.write_config(cfg)
+            self.assertIsNone(speak.app_phone(cfg, 'Hi', 'Hi', [('default', 'Hi')], [('en', 'Hi')], set(), both=True))
+        click.assert_not_called()
+        self.assertIsNone(tap.relayed)
+        self.assertIsInstance(voice.relayed, list)
+        self.assertEqual(len(voice.relayed), 2)
+        self.assertIs(voice.relayed[1], player.sock)
+        end.assert_called_once()                     # the phone's stream, not the player's
+        self.assertEqual(player.finished, 10.0)
+        self.assertIn('to the phone and the Mac', self.log_text())
+
+
+class AppVoiceSpeaker(SpeakerTests):
+    """speak()'s use of the app's voice: output phone and app."""
+
+    def test_phone_output_uses_the_app_voice_when_the_debugger_is_on(self):
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'app_phone', return_value=None) as app_phone:
+            run, deliver = self.run_speaker({'output': 'phone', 'phone_token': '123456', 'default_lang': 'en'})
+        self.assertEqual(app_phone.call_args.kwargs, {'button': False, 'synth': True})
+        run.assert_not_called()
+        deliver.assert_not_called()
+
+    def test_phone_output_without_the_debugger_or_wanting_text(self):
+        for on, cfg in ((False, {}), (True, {'phone_voice': 'text'})):
+            with mock.patch.object(speak, 'app_voice_on', return_value=on), \
+                 mock.patch.object(speak, 'app_phone') as app_phone:
+                run, deliver = self.run_speaker(dict({'output': 'phone', 'phone_token': '123456'}, **cfg))
+            app_phone.assert_not_called()
+            deliver.assert_called_once()
+            run.assert_not_called()
+
+    def test_phone_output_whose_mac_app_did_not_answer_plays_on_the_mac(self):
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'app_phone', return_value='mac'), \
+             mock.patch.object(speak, 'app_voice_here', return_value=None) as here, \
+             mock.patch.object(speak, 'app_read', return_value=True) as click:
+            run, deliver = self.run_speaker({'output': 'phone', 'phone_token': '123456', 'default_lang': 'en'})
+        click.assert_not_called()                    # never the button for output phone
+        here.assert_called_once()
+        self.assertEqual(run.call_count, 2)          # the Mac's own voices, when the app's can't play
+        deliver.assert_not_called()
+
+    def test_app_output_plays_the_app_voice_without_the_button(self):
+        voice = FakeTap()
+        player = FakePlayer()
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'start_app_voice', return_value=voice) as start, \
+             mock.patch.object(speak, 'MacPlayer', player), \
+             mock.patch.object(speak, 'app_read', return_value=True) as click:
+            run, deliver = self.run_speaker({'output': 'app', 'default_lang': 'en'}, 'Hello **there**')
+        start.assert_called_once_with('Hello there', 'app (Mac)')
+        click.assert_not_called()
+        self.assertIs(voice.relayed, player.sock)
+        self.assertEqual(player.finished, 10.0)
+        run.assert_not_called()
+        deliver.assert_not_called()
+
+    def test_app_output_presses_the_button_when_the_app_voice_fails(self):
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'start_app_voice', return_value=None), \
+             mock.patch.object(speak, 'app_read', return_value=True) as click:
+            run, _ = self.run_speaker({'output': 'app', 'default_lang': 'en'})
+        click.assert_called_once()
+        run.assert_not_called()
+
+    def test_app_output_without_a_player_presses_the_button(self):
+        voice = FakeTap()
+
+        def no_player(cfg):
+            raise OSError('ffmpeg not found')
+        with mock.patch.object(speak, 'app_voice_on', return_value=True), \
+             mock.patch.object(speak, 'start_app_voice', return_value=voice), \
+             mock.patch.object(speak, 'MacPlayer', no_player), \
+             mock.patch.object(speak, 'app_read', return_value=True) as click:
+            self.run_speaker({'output': 'app', 'default_lang': 'en'})
+        self.assertEqual(voice.stopped, 0)
+        click.assert_called_once()
+        self.assertIn('app (Mac): no player (ffmpeg not found); the button instead', self.log_text())
+
+
+class AppVoicePage(unittest.TestCase):
+    """app-voice-lib.mjs through node (skipped without it): the page's side against stand-ins for
+    the page (its modules, fetch, WebSocket: no network), and the audio handling."""
+
+    LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'app-voice-lib.mjs')
+
+    def node(self, code):
+        import shutil
+        import subprocess
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node not found')
+        out = subprocess.run([node, '--input-type=module', '-e', code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_resampler_keeps_the_pitch_and_the_length(self):
+        code = (f'import {{ Resampler }} from {json.dumps(os.path.abspath(self.LIB))};\n'
+                'const input = Buffer.alloc(32000);\n'
+                'for (let i = 0; i < 16000; i++) input.writeInt16LE(Math.round(10000 * Math.sin(2 * Math.PI * 440 * i / 16000)), i * 2);\n'
+                'const r = new Resampler(16000, 24000);\n'
+                'const parts = [];\n'
+                'for (let i = 0; i < input.length; i += 1001) parts.push(r.push(input.subarray(i, i + 1001)));\n'
+                'parts.push(r.flush());\n'
+                'const out = Buffer.concat(parts);\n'
+                'const n = out.length / 2;\n'
+                'let crossings = 0, peak = 0;\n'
+                'for (let i = 1; i < n; i++) { const a = out.readInt16LE((i - 1) * 2), b = out.readInt16LE(i * 2);\n'
+                '  if ((a < 0) !== (b < 0)) crossings++; if (i > 100 && i < n - 100) peak = Math.max(peak, Math.abs(b)); }\n'
+                'const same = new Resampler(24000, 24000).push(Buffer.from([1, 2, 3]));\n'
+                'console.log(JSON.stringify([n, crossings, peak, same.length]));\n')
+        n, crossings, peak, same = self.node(code)
+        self.assertLessEqual(abs(n - 24000), 2)
+        self.assertLessEqual(abs(crossings - 880), 3)        # 440 Hz for a second
+        self.assertLess(abs(peak - 10000), 300)
+        self.assertEqual(same, 2)                            # whole samples only, the odd byte kept
+
+    def test_pacer_lets_out_the_lead_then_real_time(self):
+        code = (f'import {{ Pacer, wavHeader }} from {json.dumps(os.path.abspath(self.LIB))};\n'
+                'const p = new Pacer(24000, 1.0);\n'
+                'const first = p.allowed(1000); p.sent(first);\n'
+                'const none = p.allowed(1000);\n'
+                'const later = p.allowed(1500);\n'
+                'const h = wavHeader(24000, 4800);\n'
+                'console.log(JSON.stringify([first, none, later, h.length, h.readUInt32LE(24), h.readUInt32LE(40)]));\n')
+        self.assertEqual(self.node(code), [48000, 0, 24000, 44, 24000, 4800])
+
+    PAGE = r'''
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const dir = mkdtempSync(join(tmpdir(), 'sakamoto-page-'));
+const file = (name, text) => { writeFileSync(join(dir, name), text); return pathToFileURL(join(dir, name)).href; };
+file('c6-x.js', 'export const a = "organization_uuid"; export function c() { return { extra: "1" }; } export function u(p) { return "wss://test.example" + p; }');
+file('s7-x.js', 'export const S4 = { getState: () => ({ selectedVoice: "airy", voiceSpeed: 1.5 }) };');
+file('s2-x.js', 'export const $Q = () => "desktop_app";');
+file('cb17312fe-test.js', 'import{u as xe,a as _e,c as ve}from"./c6-x.js";import{S4 as ge}from"./s7-x.js";import{$Q as f}from"./s2-x.js";\n' +
+  'export const _test = { chunkForTts: (t) => [t.slice(0, 6), t.slice(6)] };\n' +
+  'export function speak(d, _, D) { const {selectedVoice:w,voiceSpeed:T}=ge.getState(); ' +
+  'return [new URLSearchParams({client_platform:f(),..._?{language:_}:{},...d?{[_e]:d}:{},...ve(),...D?{speech_checkpoints:"1"}:{}}), xe(`/api/ws/text_to_speech/text_stream?${w}`)]; }\n');
+const index = file('index.js', 'import("./cb17312fe-test.js")');
+globalThis.window = globalThis;
+globalThis.document = { querySelectorAll: () => [{ src: index }] };
+globalThis.localStorage = { getItem: () => null };
+globalThis.location = { host: 'claude.example' };
+globalThis.fetch = async (url) => ({ text: async () => readFileSync(new URL(url), 'utf8') });
+const sockets = [];
+globalThis.WebSocket = class {
+  constructor(url) { this.url = url; this.sent = []; this.readyState = 0; sockets.push(this); }
+  send(m) { this.sent.push(JSON.parse(m)); }
+  close() { if (this.readyState === 3) return; this.readyState = 3; this.onclose && this.onclose({ code: 1000 }); }
+};
+const { pageVoice } = await import(LIB);
+const out = {};
+out.started = await pageVoice('start', { id: 'a', text: 'Hello there, friend.' });
+const ws = sockets[0];
+out.url = ws.url;
+ws.readyState = 1; ws.onopen();
+out.sent = ws.sent;
+ws.onmessage({ data: new Uint8Array([1, 2, 3, 4]).buffer });
+ws.onmessage({ data: JSON.stringify({ type: 'SpeechInfo' }) });
+out.first = window.__sakamotoVoice.drain('a');
+ws.onmessage({ data: new Uint8Array([5, 6]).buffer });
+ws.onmessage({ data: JSON.stringify({ type: 'SpeechComplete', audio_sent_ms: 125 }) });
+out.last = window.__sakamotoVoice.drain('a');
+out.cleanAfterEnd = typeof window.__sakamotoVoice;
+// A second reading, stopped; then one the server refuses.
+await pageVoice('start', { id: 'b', text: 'Again.' });
+const b = sockets[1]; b.readyState = 1; b.onopen();
+out.stopped = await pageVoice('stop', 'b');
+out.bClosed = b.readyState;
+out.cleanAfterStop = typeof window.__sakamotoVoice;
+await pageVoice('start', { id: 'c', text: 'Refused.' });
+const c = sockets[2]; c.readyState = 1; c.onopen();
+c.onmessage({ data: JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Slow down' } }) });
+out.refused = window.__sakamotoVoice.drain('c');
+// Without the app's modules: the defaults.
+globalThis.document = { querySelectorAll: () => [] };
+globalThis.localStorage = { getItem: (k) => ({ 'claude-voice-speed': '0.9' })[k] || null };
+out.plain = await pageVoice('start', { id: 'd', text: 'Plain.' });
+out.plainUrl = sockets[3].url;
+await pageVoice('stop', '*');
+out.cleanAtLast = typeof window.__sakamotoVoice;
+rmSync(dir, { recursive: true, force: true });
+console.log(JSON.stringify(out));
+process.exit(0);
+'''
+
+    def test_the_page_side(self):
+        out = self.node(self.PAGE.replace('LIB', json.dumps('file://' + os.path.abspath(self.LIB))))
+        self.assertEqual({k: out['started'][k] for k in ('id', 'voice', 'speed', 'platform', 'pieces', 'notes')},
+                         {'id': 'a', 'voice': 'airy', 'speed': '1.20', 'platform': 'desktop_app', 'pieces': 2, 'notes': []})
+        self.assertEqual(out['url'], 'wss://test.example/api/ws/text_to_speech/text_stream?output_format=pcm_16000'
+                                     '&voice=airy&tts_speed=1.20&client_platform=desktop_app&extra=1')
+        self.assertEqual(out['sent'], [{'type': 'text_chunk', 'text': 'Hello '},
+                                       {'type': 'text_chunk', 'text': 'there, friend.'}, {'type': 'close_stream'}])
+        self.assertEqual(out['first'], {'state': 'open', 'events': ['SpeechInfo'],
+                                        'audio': base64.b64encode(b'\1\2\3\4').decode()})
+        self.assertEqual(out['last'], {'state': 'closed', 'events': ['SpeechComplete 125 ms'], 'audio': 'BQY=',
+                                       'why': 'complete', 'close': 1000})
+        self.assertEqual(out['cleanAfterEnd'], 'undefined')          # nothing left in the page
+        self.assertEqual((out['stopped'], out['bClosed'], out['cleanAfterStop']), ({'stopped': True}, 3, 'undefined'))
+        self.assertEqual((out['refused']['error'], out['refused']['state']), ('error: Slow down', 'closed'))
+        self.assertIn('helpers: the read-aloud engine module was not found', out['plain']['notes'])
+        self.assertEqual(out['plainUrl'], 'wss://claude.example/api/ws/text_to_speech/text_stream?output_format=pcm_16000'
+                                          '&voice=buttery&tts_speed=0.90&client_platform=desktop_app')
+        self.assertEqual(out['cleanAtLast'], 'undefined')

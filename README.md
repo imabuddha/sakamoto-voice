@@ -99,7 +99,8 @@ the highest-quality voice installed, from any region.
 - For the **Apple Watch app** (optional): an Apple Watch with watchOS 11 or later, paired with that
   iPhone.
 - For the **experimental app modes**: the Claude desktop app and Node.js 22 or later (`node`).
-  `output app-phone` also needs `app-voice-tap`, built with Xcode's Swift toolchain.
+  The app's voice on the Mac without its button needs `ffmpeg` (`brew install ffmpeg`); the
+  button's path for `output app-phone` needs `app-voice-tap`, built with Xcode's Swift toolchain.
 
 ## Install
 
@@ -204,7 +205,9 @@ prints them; most are set by the commands below, and the rest you can edit by ha
 | `phone_voice` | what the phone last said it wants for the Claude app's voice, `"stream"` or `"text"`, kept automatically from its every answer (empty until it has answered; a phone app older than 1.0 counts as `"stream"`); see "The phone has the last word" below |
 | `phone_route` | for Sakamoto Eyes (several phones, one per room): the path of its hub's `voice-route.json` (empty, the default, turns it off). A reply to a line the hub heard goes only to the phone in that room, with the Mac quiet so that phone's echo canceller can work; if that phone doesn't answer, nothing is heard (never a phone in another room). When the route names the Mac instead (`"mac": true`: the line came from the Mac app's room, and from the Mac app itself or with no phone there that plays her voice), the reply plays only on the Mac, as `output`'s Mac side (`app-phone` and `app-both` as `app`, `phone` and `both` as `mac`), and no phone gets it. What Claude says unprompted (after a notice) or in reply to a typed prompt goes to the room he was last heard in when the hub knows it, else to every room that isn't silenced; with `output app-phone` and no phone listed in his room (the Mac app's room, say), it plays on the Mac app there rather than nowhere. When the hub also says where her voice may play (Sakamoto Eyes hub 0.2.35: `level`, `levels`, `mac_silent`, each phone's `silent`; hub 0.2.36: `mac_rooms`, `his_room`; counted only while its `status.json` beside the file is under a minute old), a reply to a heard line belongs to the room its 👂 label names, a late line's too (a route to another room isn't followed: with none to that room, the listed phones there and the Mac when its speakers are there), and a room whose level is Mute or Ears off hears her nowhere: a reply to a line heard there plays in no room and not on the Mac, and goes to the hub's `commands.jsonl` (created when missing) as a `silent_reply` for its sign or board there instead; a reply to a notice or to a typed prompt goes only to the room John is in when the hub knows it (nothing when that room is muted), else to every listed phone in a room that isn't muted, and to the Mac as `output` says unless its speakers are in a muted room, and is silent when nothing is left (no route is followed for these). A reply that is only emoji (or "…") with her time before or after it, or only her time sign-off, is not spoken; a bare time that isn't the time now (or up to two minutes before) is an answer, and is. Every phone needs the same pairing code. A route older than 30 minutes changes nothing. When the hub listens on `her-voice.sock` next to that file, the streamed voice is also copied there, never waiting for the hub, so it can time the emoji in a reply to the moment her voice reaches them. The hub also hears of every reading on the Mac's own speakers, as it plays (marked `mac`): the app's voice on the Mac alone through `app-voice-tap` unmuted (the speaker then follows the reading to its end), or a note with no audio while `say` speaks; its phones that would hear the Mac don't listen meanwhile, since a phone's echo canceller takes out only what it plays itself |
 | `babble_factor`, `babble_margin` | the Claude app's voice streamed to the phone is cut once it runs past the larger of the reading's estimated length times `babble_factor` and that length plus `babble_margin` seconds: its Read aloud sometimes goes on "speaking" garbled babble long after the response's text ends (2 and 8 by default; 0 for either turns it off). Sakamoto Eyes' hub cuts sooner, with a fade, when it runs |
+| `app_voice` | `true` (the default): while the Claude app's debugger is on, the app's voice is asked for directly, without its Read aloud button, for `app`, `app-phone`, `app-both`, and `phone` (see "Without the button" below); `false`: never (the button, and the phone's own voices for `phone`, as before) |
 | `app_voice_tap` | where `app-voice-tap` is, for `app-phone`, when it's not in `~/.local/bin` or on the PATH |
+| `ffmpeg` | the `ffmpeg` that plays the app's voice on the Mac, when it's not on the PATH or in Homebrew's `/opt/homebrew/bin` |
 | `dev_path` | for working on the plugin (see Development) |
 
 Better voices: System Settings → Accessibility → Spoken Content → System voice → Manage Voices;
@@ -212,8 +215,9 @@ download, for example, Zoe or Ava (Premium) and Kyoko (Enhanced), then put their
 `say -v '?'` lists them, in the config. A voice that isn't installed falls back to the system voice.
 
 Failures in the detached speaker are silent but logged to `~/.config/sakamoto-voice/speak.log`
-(which starts over past 64 KB, keeping the previous one as `speak.log.1`). Each streamed reading
-(`app-phone`, `app-both`) is also kept, for checking what the Claude app's voice actually said:
+(which starts over past 64 KB, keeping the previous one as `speak.log.1`). Each reading in the
+Claude app's voice that passes through the speaker (`app-phone`, `app-both`, and any asked for
+without the button) is also kept, for checking what the Claude app's voice actually said:
 `~/.config/sakamoto-voice/recordings/latest.wav`, with the response's text in `latest.txt`; the
 one before moves to `previous.*`, and older ones are never kept.
 
@@ -448,8 +452,8 @@ Before walking off, lock the phone, so its notifications go to the watch.
 
 ## Experimental: the Claude app's own voice
 
-> **Read this first.** These two modes work through the Claude desktop app's **Main Process
-> Debugger**, a developer feature. While it is on, any program running on your Mac can run code
+> **Read this first.** These modes (and `output phone`, while the debugger is on: below) work
+> through the Claude desktop app's **Main Process Debugger**, a developer feature. While it is on, any program running on your Mac can run code
 > inside the Claude app, which holds your signed-in Claude account. Use them only if you accept
 > that trade, and turn the debugger off when you don't need it.
 
@@ -494,11 +498,60 @@ door. Turn the debugger on only when you want this, and judge the trade for your
 Code's own safety check flagged this as creating a remote-code-execution surface, which is fair.
 This mode exists because no supported route does; we've asked Anthropic for one.
 
+### Without the button: the app's voice, asked for directly
+
+Since the app's update of 2026-10-18 the Read aloud button often isn't there when a reply is done
+(above), so the speaker now asks for the same voice directly, and presses the button only when that
+fails. `plugin/scripts/app-voice.mjs`, through the same debugger, runs a little code in the claude.ai
+session page that opens **Read aloud's own text-to-speech WebSocket** (`/api/ws/text_to_speech/text_stream`
+on claude.ai), with the voice and speed Read aloud uses (the app's own setting: `buttery` at 1.2, say),
+sends it the reply's speakable text (as the speaker prepared it, `max_chars` and all), and passes the
+audio out: the service sends 16-bit mono PCM at 16 kHz, which the script resamples to the stream's
+24 kHz and writes to its standard output, paced as it plays (a second ahead at most), just as
+`app-voice-tap --stdout` writes its tap. The speaker then sends it where the tap's audio would go: to
+the phones over the same stream, to Sakamoto Eyes' hub as a copy, and, on the Mac, to `ffmpeg`
+(`-f audiotoolbox`, the current output; Homebrew's `ffmpeg` is assumed, a command-line tool with no
+window). The first sound comes about 1.2 s after the reply, measured on 2026-10-18; no tap, no click,
+and no System Audio Recording permission is needed for it.
+
+How it gets the voice: the page's WebSocket carries the request, so the session's cookies stay
+with the browser: the script never reads, copies, or logs them, and nothing about them leaves the
+page. It finds the helpers the app's read-aloud engine itself uses (its URL builder, the voice and
+speed store, the client platform) through the engine's module, by name, and falls back to plain
+defaults (`buttery`, the speed saved in the page, `desktop_app`) when one isn't found. Each reading
+leaves nothing behind in the page: the socket closes when the reading is done, when the speaker is
+stopped (a new prompt, a new response, `hush`; the script closes it on its way out), or, should the
+script die without closing it, within 8 s, when nobody has drained it; `node app-voice.mjs --stop`
+closes any left open.
+
+**What this relies on:** a private, undocumented claude.ai endpoint and the app's current code,
+neither of them meant for this. Any update of the app or the site may change or remove them, and
+then this stops working (the speaker falls back, below, and `speak.log` says why). It is the same
+service Read aloud uses for the same text, but it is used here without the button; judge that for
+yourself, as with the debugger. Turn it off with `"app_voice": false` in the config: the button
+then works as before.
+
+Where it applies, while the debugger is on:
+
+- `output app`: on the Mac, through `ffmpeg`; failing that (no `ffmpeg`, no sound within 8 s), the
+  button, as before.
+- `output app-phone`: streamed to the phones; failing that, the tap and the button, as before.
+- `output app-both`: streamed to the phones and played on the Mac; failing that, as before.
+- `output phone`: her voice streamed to the phone instead of the phone's own voices from the
+  text, unless the phone wants the text (its Claude's Voice setting); failing that, or with the
+  debugger off, the phone gets the response as `output phone` always sent it (in `phone_mode`).
+
+Try it by hand (the debugger on; it writes a WAV and touches nothing else):
+
+    node plugin/scripts/app-voice.mjs --wav /tmp/voice.wav --text "Testing her voice."
+
 ### `output app`: on the Mac
 
     sakamoto output app          # the app's voice when its debugger is on, else the Mac's
 
-Once Read aloud is pressed the speaker exits, so `speaker.pid` is gone while the app still reads.
+With the app's voice asked for directly (above), the speaker plays it to its end, so `speaker.pid`
+names it meanwhile, as for the Mac's own voices, and `stop` silences it. When the button is pressed
+instead, the speaker exits, so `speaker.pid` is gone while the app still reads.
 For Sakamoto Eyes, `~/.config/sakamoto-voice/app-reading` then says the app is reading:
 `{"started": …, "ends": …, "text": …}` (Unix times; the end estimated from the text at about 165
 words a minute, or 6.5 Japanese characters a second, plus 1.5 s). The next response, `stop`, and
@@ -508,11 +561,13 @@ the same debugger.
 ### `output app-phone`: streamed to the phone
 
 For when you're away from the Mac: the same voice, streamed live to the phone, with the Mac's
-speakers silent. With `output app-phone`, the speaker (still detached; the hook never waits):
+speakers silent. The speaker first asks for the voice directly (above); when that fails, it taps
+the button's reading. With `output app-phone`, the speaker (still detached; the hook never waits):
 
 1. connects to the phone (finding it again if it moved) and sends the stream's header, carrying
    the response's text for its screen; the phone accepts it at once (or refuses a wrong code);
-2. starts `app-voice-tap --stdout` (`mac/AppVoiceTap`), which taps the Claude app's audio with a
+2. starts `app-voice.mjs` (above), and once its first audio has come, skips to step 4; else
+   starts `app-voice-tap --stdout` (`mac/AppVoiceTap`), which taps the Claude app's audio with a
    Core Audio **process tap**: every process running from inside `/Applications/Claude.app` (its
    audio comes from a helper process) or with the bundle ID `com.anthropic.claudefordesktop` or
    `...claudefordesktop.helper` (on macOS 26 and later the tap also names those bundle IDs, so a
@@ -612,7 +667,9 @@ server: the plugin speaks with macOS `say`, finds the phone with Bonjour, and se
 straight to it; the phone app only listens on the local network and never connects out, except
 that it passes messages to its own watch app, through Apple's WatchConnectivity and local
 notifications, between the paired phone and watch (the watch keeps the last ten). The app
-modes talk only to the Claude app on `127.0.0.1`. Files are kept in
+modes talk only to the Claude app on `127.0.0.1`; when the app's voice is asked for directly
+(`app_voice`), the Claude app's own claude.ai page sends the response's text to claude.ai's
+text-to-speech service, as its Read aloud button would. Files are kept in
 `~/.config/sakamoto-voice/`: the settings, and `speak.log`, which records what happened (errors,
 the phone's address, and, in the app modes, the first few letters of each response it matched).
 
@@ -622,7 +679,8 @@ it on a network you trust.
 
 ## Development
 
-The tests, all headless (nothing is launched and no audio is captured):
+The tests, all headless (nothing is launched, no audio is captured or played, and the Claude app's
+debugger is never used: the app's voice is mocked, and its page code runs against stand-ins in node):
 
     python3 -m unittest discover -s plugin/tests        # the plugin
     swift test --package-path ios/SakamotoVoiceKit       # the phone app's core, on the Mac
