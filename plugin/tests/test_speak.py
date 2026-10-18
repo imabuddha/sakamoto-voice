@@ -2227,14 +2227,55 @@ class StartLatency(Isolated):
         with mock.patch.object(speak, 'installed_voices', side_effect=RuntimeError('boom')):
             self.assertEqual(len(speak.LazyVoices()), 0)
 
-    def test_the_page_is_watched_closely(self):
+    def test_the_page_is_watched_closely_from_outside_it(self):
+        """2026-10-18: the app's session page is hidden to Chromium, which throttles its timers (a
+        50 ms setTimeout takes 1 s, then a chain of them stalls for 8 s or more), so the loop that
+        slept in the page hung and "app: timeout" followed almost every reply. The pauses are the
+        main process's, and the code run in the page is one synchronous look."""
         here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'app-read.mjs')
         with open(here, encoding='utf-8') as f:
             source = f.read()
-        self.assertIn('new MutationObserver', source)
         poll = int(re.search(r'const POLL_MS = (\d+);', source).group(1))
         self.assertLessEqual(poll, 100)
-        self.assertNotIn('setTimeout(r, 500)', source)
+        page = source[source.index('const inPage = `'):source.index('const expression = `')]
+        for needs_the_page_awake in ('setTimeout', 'setInterval', 'requestAnimationFrame', 'MutationObserver',
+                                     'await', 'async'):
+            self.assertNotIn(needs_the_page_awake, page)
+        self.assertIn('watchPage(() => page.executeJavaScript(', source)
+
+    def test_watch_page_pauses_in_the_caller_and_ends_with_the_last_reason(self):
+        import shutil
+        import subprocess
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node not found')
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts', 'app-read-match.mjs')
+        code = (f'import {{ watchPage }} from {json.dumps(os.path.abspath(here))};\n'
+                'const run = async (answers, wait, poll) => {\n'
+                '  let looks = 0;\n'
+                '  const t = Date.now();\n'
+                '  const out = await watchPage(async () => answers[Math.min(looks++, answers.length - 1)], wait, poll);\n'
+                '  return [out, looks, Date.now() - t];\n'
+                '};\n'
+                'const results = [\n'
+                '  await run([{ why: "no matching message; the newest holds 3 chars: abc" }, {}, { done: "clicked (at 0 of 9)" }], 2000, 20),\n'
+                '  await run([{ why: "no matching message; the newest holds 3 chars: abc" }, {}], 200, 20),\n'
+                '  await run([{}], 100, 20),\n'
+                '  await run([{ done: "earlier text first (40 chars)" }], 2000, 20),\n'
+                '  await run([{}], 0, 20),\n'
+                '];\n'
+                'console.log(JSON.stringify(results));\n')
+        out = subprocess.run([node, '--input-type=module', '-e', code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        again, ended, nothing, refused, once = json.loads(out.stdout)
+        self.assertEqual(again[:2], ['clicked (at 0 of 9)', 3])          # looked again until the third look
+        self.assertLess(again[2], 500)
+        self.assertEqual(ended[0], 'no matching message; the newest holds 3 chars: abc')   # a later empty look keeps it
+        self.assertGreater(ended[1], 3)                                 # polled, not one look
+        self.assertGreaterEqual(ended[2], 190)                          # until the wait was over
+        self.assertEqual(nothing[0], 'no Read aloud button')
+        self.assertEqual(refused[:2], ['earlier text first (40 chars)', 1])
+        self.assertEqual(once[:2], ['no Read aloud button', 1])         # even with no time to wait, one look
 
 
 class VoiceRace(Isolated):

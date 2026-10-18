@@ -51,3 +51,26 @@ export function findKey(text, key, slack = 24) {
   }
   return -1;
 }
+
+// Looks at the page again and again, from outside it, for up to waitMs: the answer of the first look
+// that has one (`done`), else the last reason any look gave (`why`), else `fallback`.
+//
+// Why from outside (2026-10-18, after the app's update): the app's session page is now "hidden" to
+// Chromium (document.visibilityState), and a hidden page's timers are throttled: a 50 ms
+// setTimeout fires after 1 s, and a chain of them soon stalls for 8 s or more, so a loop that slept
+// in the page looked once or twice and then hung past app-read's own limit ("app: timeout").
+// executeJavaScript itself answers at once in a hidden page, and the main process's timers are not
+// throttled, so the pauses are here and each look is one synchronous call into the page.
+// `look` returns { done } or { why }; it is called at least once, so waitMs can never end the
+// search before the page has been seen.
+export async function watchPage(look, waitMs, pollMs, fallback = 'no Read aloud button') {
+  const end = Date.now() + waitMs;
+  let why = fallback;
+  for (;;) {
+    const seen = (await look()) || {};
+    if (seen.done) return seen.done;
+    if (seen.why) why = seen.why;
+    if (Date.now() >= end) return why;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}

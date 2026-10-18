@@ -464,7 +464,10 @@ response that just finished, on the focused Code session's page. It finds that r
 opening text (letters and digits only, so formatting doesn't matter; code blocks left out on both
 sides, and a few other letters, such as a code block's label, allowed among the key's), waits up to
 8 s for the page to draw its button, and 6 s more when no message matched (a tool-heavy turn's page
-may still be drawing), and marks each button it presses, so an earlier response is never read by
+may still be drawing). It looks every 50 ms, with the pauses taken in the app's main process: the
+session page is often "hidden" to Chromium (another window in front, or the app's newer layout), and
+a hidden page throttles its own timers to a second or worse, which once made the lookup hang and
+time out on almost every reply. It marks each button it presses, so an earlier response is never read by
 mistake. A button reads its whole block, and a reply that follows a notice rather than a new
 message can share a block with the reply before it; when the response starts well into its block,
 the button isn't pressed, and the Mac's or the phone's voices read just the new response. That
