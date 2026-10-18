@@ -467,7 +467,9 @@ sides, and a few other letters, such as a code block's label, allowed among the 
 may still be drawing). It looks every 50 ms, with the pauses taken in the app's main process: the
 session page is often "hidden" to Chromium (another window in front, or the app's newer layout), and
 a hidden page throttles its own timers to a second or worse, which once made the lookup hang and
-time out on almost every reply. It marks each button it presses, so an earlier response is never read by
+time out on almost every reply. A hidden page (a locked screen, for one) also stops drawing new
+replies, so the lookup first turns off the page's background throttling, which keeps it visible
+until the app restarts. It marks each button it presses, so an earlier response is never read by
 mistake. A button reads its whole block, and a reply that follows a notice rather than a new
 message can share a block with the reply before it; when the response starts well into its block,
 the button isn't pressed, and the Mac's or the phone's voices read just the new response. That

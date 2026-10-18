@@ -92,6 +92,9 @@ const expression = `(async () => {
   const pages = webContents.getAllWebContents().filter(w => w.getURL().includes('claude.ai/epitaxy/'));
   const page = pages.find(w => w.isFocused()) || pages[0];
   if (!page) return 'no session page';
+  // A locked screen or covered window hides the page: it stops rendering new replies. Keep it
+  // running (this also keeps document.visibilityState "visible"); it resets when the app restarts.
+  page.setBackgroundThrottling(false);
   const watchPage = ${watchPage};
   return await watchPage(() => page.executeJavaScript(${JSON.stringify(inPage)}), ${WAIT_MS}, ${POLL_MS});
 })()`;
