@@ -2675,6 +2675,21 @@ class AppVoiceTests(FakeToolCase):
         self.assertTrue(voice.last_line().startswith('read: 1.0 s of audio'))
         self.assertEqual(voice.name, 'app-voice')
 
+    def test_the_config_can_name_the_voice_and_the_language(self):
+        # Unset (the default), app-voice.mjs uses Read aloud's own (the account's settings).
+        with self.mode('ok'):
+            voice = speak.AppVoice('Hello', {'app_voice_voice': '', 'app_voice_language': ''})
+        voice.wait_ready(timeout=5)
+        voice.stop(grace=0)
+        self.assertNotIn('--voice', self.read('voice-args'))
+        self.assertNotIn('--language', self.read('voice-args'))
+        with self.mode('ok'):
+            voice = speak.start_app_voice('Hello', 'app (Mac)', {'app_voice_voice': ' ja-akarui ', 'app_voice_language': 'ja'})
+        self.addCleanup(lambda: voice.proc.poll() is None and voice.proc.kill())
+        voice.stop(grace=0)
+        self.assertEqual(self.read('voice-args').split('\n')[-5:-1], ['--voice', 'ja-akarui', '--language', 'ja'])
+        self.assertEqual((speak.DEFAULTS['app_voice_voice'], speak.DEFAULTS['app_voice_language']), ('', ''))
+
     def test_start_app_voice_returns_it_once_audio_comes(self):
         with self.mode('ok'):
             voice = speak.start_app_voice('Hello', 'app-phone')
@@ -2769,7 +2784,9 @@ class AppVoiceRoutes(AppPhoneTests):
         with mock.patch.object(speak, 'app_voice_on', return_value=True), \
              mock.patch.object(speak, 'start_app_voice', return_value=voice) as start:
             tap, _, click, deliver = self.run_app_phone()
-        start.assert_called_once_with('Hello 囲碁', 'app-phone')
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[:2], ('Hello 囲碁', 'app-phone'))
+        self.assertEqual(start.call_args.args[2]['phone_token'], '123456')     # the config, for its overrides
         click.assert_not_called()                   # no button
         self.assertIsNone(tap.relayed)              # and no tap
         self.assertIs(voice.relayed, self.sock)
@@ -2892,7 +2909,9 @@ class AppVoiceSpeaker(SpeakerTests):
              mock.patch.object(speak, 'MacPlayer', player), \
              mock.patch.object(speak, 'app_read', return_value=True) as click:
             run, deliver = self.run_speaker({'output': 'app', 'default_lang': 'en'}, 'Hello **there**')
-        start.assert_called_once_with('Hello there', 'app (Mac)')
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[:2], ('Hello there', 'app (Mac)'))
+        self.assertEqual(start.call_args.args[2]['output'], 'app')            # the config, for its overrides
         click.assert_not_called()
         self.assertIs(voice.relayed, player.sock)
         self.assertEqual(player.finished, 10.0)
@@ -2985,7 +3004,16 @@ file('cb17312fe-test.js', 'import{u as xe,a as _e,c as ve}from"./c6-x.js";import
   'return [new URLSearchParams({client_platform:f(),..._?{language:_}:{},...d?{[_e]:d}:{},...ve(),...D?{speech_checkpoints:"1"}:{}}), xe(`/api/ws/text_to_speech/text_stream?${w}`)]; }\n');
 const index = file('index.js', 'import("./cb17312fe-test.js")');
 globalThis.window = globalThis;
-globalThis.document = { querySelectorAll: () => [{ src: index }] };
+// The page's React tree: a root, a host element, a provider that isn't the account's, then the
+// account context (CurrentAccountProvider's value), whose settings the Read aloud button reads.
+let settings = { voice_preference: 'ja-akarui', voice_speed: 1.1, voice_language_code: 'ja' };
+const fiber = (type, value, child = null, sibling = null) => ({ type, memoizedProps: value === undefined ? {} : { value, children: 1 }, child, sibling });
+const accountCtx = { $$typeof: Symbol.for('react.context') };
+const root = fiber(null, undefined, fiber('div', undefined,
+  fiber({ $$typeof: Symbol.for('react.context') }, { theme: 'dark' },
+    fiber(accountCtx, { get account() { return { settings }; }, activeOrganization: { uuid: 'org-1' } }))));
+globalThis.document = { querySelectorAll: () => [{ src: index }], getElementById: () => null,
+  body: { children: [{ __reactContainer$test: root }] } };
 globalThis.localStorage = { getItem: () => null };
 globalThis.location = { host: 'claude.example' };
 globalThis.fetch = async (url) => ({ text: async () => readFileSync(new URL(url), 'utf8') });
@@ -3009,14 +3037,19 @@ ws.onmessage({ data: new Uint8Array([5, 6]).buffer });
 ws.onmessage({ data: JSON.stringify({ type: 'SpeechComplete', audio_sent_ms: 125 }) });
 out.last = window.__sakamotoVoice.drain('a');
 out.cleanAfterEnd = typeof window.__sakamotoVoice;
-// A second reading, stopped; then one the server refuses.
-await pageVoice('start', { id: 'b', text: 'Again.' });
+// A second reading, after the settings changed (no voice or language chosen, a speed out of range:
+// the store's), stopped; then one with the voice and language given, which the server refuses.
+settings = { voice_speed: 3 };
+out.storeVoice = await pageVoice('start', { id: 'b', text: 'Again.' });
 const b = sockets[1]; b.readyState = 1; b.onopen();
+out.storeUrl = b.url;
 out.stopped = await pageVoice('stop', 'b');
 out.bClosed = b.readyState;
 out.cleanAfterStop = typeof window.__sakamotoVoice;
-await pageVoice('start', { id: 'c', text: 'Refused.' });
+settings = { voice_preference: 'ja-akarui', voice_language_code: 'ja' };
+out.given = await pageVoice('start', { id: 'c', text: 'Refused.', voice: 'glassy', language: 'en' });
 const c = sockets[2]; c.readyState = 1; c.onopen();
+out.givenUrl = c.url;
 c.onmessage({ data: JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Slow down' } }) });
 out.refused = window.__sakamotoVoice.drain('c');
 // Without the app's modules: the defaults.
@@ -3033,10 +3066,25 @@ process.exit(0);
 
     def test_the_page_side(self):
         out = self.node(self.PAGE.replace('LIB', json.dumps('file://' + os.path.abspath(self.LIB))))
-        self.assertEqual({k: out['started'][k] for k in ('id', 'voice', 'speed', 'platform', 'pieces', 'notes')},
-                         {'id': 'a', 'voice': 'airy', 'speed': '1.20', 'platform': 'desktop_app', 'pieces': 2, 'notes': []})
+        # The account's settings, as the Read aloud button passes them: voice, speed, language, organization.
+        self.assertEqual({k: out['started'][k] for k in ('id', 'voice', 'speed', 'language', 'platform', 'pieces', 'notes')},
+                         {'id': 'a', 'voice': 'ja-akarui', 'speed': '1.10', 'language': 'ja', 'platform': 'desktop_app',
+                          'pieces': 2, 'notes': []})
         self.assertEqual(out['url'], 'wss://test.example/api/ws/text_to_speech/text_stream?output_format=pcm_16000'
-                                     '&voice=airy&tts_speed=1.20&client_platform=desktop_app&extra=1')
+                                     '&voice=ja-akarui&tts_speed=1.10&client_platform=desktop_app&language=ja'
+                                     '&organization_uuid=org-1&extra=1')
+        self.assertNotIn('org-1', json.dumps(out['started']))        # used, not reported
+        # Settings changed in the page: the next reading follows them (none chosen: the store's voice
+        # and speed, held to 1.2, and no language).
+        self.assertEqual((out['storeVoice']['voice'], out['storeVoice']['speed'], out['storeVoice']['language']),
+                         ('airy', '1.20', ''))
+        self.assertEqual(out['storeUrl'], 'wss://test.example/api/ws/text_to_speech/text_stream?output_format=pcm_16000'
+                                          '&voice=airy&tts_speed=1.20&client_platform=desktop_app'
+                                          '&organization_uuid=org-1&extra=1')
+        # Given (the config's app_voice_voice and app_voice_language): those instead.
+        self.assertEqual((out['given']['voice'], out['given']['language']), ('glassy', 'en'))
+        self.assertIn('?output_format=pcm_16000&voice=glassy&tts_speed=1.20&', out['givenUrl'])
+        self.assertIn('&language=en&', out['givenUrl'])
         self.assertEqual(out['sent'], [{'type': 'text_chunk', 'text': 'Hello '},
                                        {'type': 'text_chunk', 'text': 'there, friend.'}, {'type': 'close_stream'}])
         self.assertEqual(out['first'], {'state': 'open', 'events': ['SpeechInfo'],
@@ -3047,6 +3095,7 @@ process.exit(0);
         self.assertEqual((out['stopped'], out['bClosed'], out['cleanAfterStop']), ({'stopped': True}, 3, 'undefined'))
         self.assertEqual((out['refused']['error'], out['refused']['state']), ('error: Slow down', 'closed'))
         self.assertIn('helpers: the read-aloud engine module was not found', out['plain']['notes'])
+        self.assertIn('no React root', out['plain']['notes'])
         self.assertEqual(out['plainUrl'], 'wss://claude.example/api/ws/text_to_speech/text_stream?output_format=pcm_16000'
                                           '&voice=buttery&tts_speed=0.90&client_platform=desktop_app')
         self.assertEqual(out['cleanAtLast'], 'undefined')

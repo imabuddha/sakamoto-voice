@@ -206,6 +206,7 @@ prints them; most are set by the commands below, and the rest you can edit by ha
 | `phone_route` | for Sakamoto Eyes (several phones, one per room): the path of its hub's `voice-route.json` (empty, the default, turns it off). A reply to a line the hub heard goes only to the phone in that room, with the Mac quiet so that phone's echo canceller can work; if that phone doesn't answer, nothing is heard (never a phone in another room). When the route names the Mac instead (`"mac": true`: the line came from the Mac app's room, and from the Mac app itself or with no phone there that plays her voice), the reply plays only on the Mac, as `output`'s Mac side (`app-phone` and `app-both` as `app`, `phone` and `both` as `mac`), and no phone gets it. What Claude says unprompted (after a notice) or in reply to a typed prompt goes to the room he was last heard in when the hub knows it, else to every room that isn't silenced; with `output app-phone` and no phone listed in his room (the Mac app's room, say), it plays on the Mac app there rather than nowhere. When the hub also says where her voice may play (Sakamoto Eyes hub 0.2.35: `level`, `levels`, `mac_silent`, each phone's `silent`; hub 0.2.36: `mac_rooms`, `his_room`; counted only while its `status.json` beside the file is under a minute old), a reply to a heard line belongs to the room its 👂 label names, a late line's too (a route to another room isn't followed: with none to that room, the listed phones there and the Mac when its speakers are there), and a room whose level is Mute or Ears off hears her nowhere: a reply to a line heard there plays in no room and not on the Mac, and goes to the hub's `commands.jsonl` (created when missing) as a `silent_reply` for its sign or board there instead; a reply to a notice or to a typed prompt goes only to the room John is in when the hub knows it (nothing when that room is muted), else to every listed phone in a room that isn't muted, and to the Mac as `output` says unless its speakers are in a muted room, and is silent when nothing is left (no route is followed for these). A reply that is only emoji (or "…") with her time before or after it, or only her time sign-off, is not spoken; a bare time that isn't the time now (or up to two minutes before) is an answer, and is. Every phone needs the same pairing code. A route older than 30 minutes changes nothing. When the hub listens on `her-voice.sock` next to that file, the streamed voice is also copied there, never waiting for the hub, so it can time the emoji in a reply to the moment her voice reaches them. The hub also hears of every reading on the Mac's own speakers, as it plays (marked `mac`): the app's voice on the Mac alone through `app-voice-tap` unmuted (the speaker then follows the reading to its end), or a note with no audio while `say` speaks; its phones that would hear the Mac don't listen meanwhile, since a phone's echo canceller takes out only what it plays itself |
 | `babble_factor`, `babble_margin` | the Claude app's voice streamed to the phone is cut once it runs past the larger of the reading's estimated length times `babble_factor` and that length plus `babble_margin` seconds: its Read aloud sometimes goes on "speaking" garbled babble long after the response's text ends (2 and 8 by default; 0 for either turns it off). Sakamoto Eyes' hub cuts sooner, with a fade, when it runs |
 | `app_voice` | `true` (the default): while the Claude app's debugger is on, the app's voice is asked for directly, without its Read aloud button, for `app`, `app-phone`, `app-both`, and `phone` (see "Without the button" below); `false`: never (the button, and the phone's own voices for `phone`, as before) |
+| `app_voice_voice`, `app_voice_language` | empty (the default): the voice and language Read aloud uses, from the account's settings (Settings > General > Voice); set, a voice ID (`ja-akarui`) or a language code (`ja`) that `app-voice.mjs` asks for instead (see "Without the button" below) |
 | `app_voice_tap` | where `app-voice-tap` is, for `app-phone`, when it's not in `~/.local/bin` or on the PATH |
 | `ffmpeg` | the `ffmpeg` that plays the app's voice on the Mac, when it's not on the PATH or in Homebrew's `/opt/homebrew/bin` |
 | `dev_path` | for working on the plugin (see Development) |
@@ -504,8 +505,8 @@ Since the app's update of 2026-10-18 the Read aloud button often isn't there whe
 (above), so the speaker now asks for the same voice directly, and presses the button only when that
 fails. `plugin/scripts/app-voice.mjs`, through the same debugger, runs a little code in the claude.ai
 session page that opens **Read aloud's own text-to-speech WebSocket** (`/api/ws/text_to_speech/text_stream`
-on claude.ai), with the voice and speed Read aloud uses (the app's own setting: `buttery` at 1.2, say),
-sends it the reply's speakable text (as the speaker prepared it, `max_chars` and all), and passes the
+on claude.ai), with the voice, speed, and language Read aloud uses (the account's Voice settings:
+`ja-akarui` in `ja` at 1.2, say), sends it the reply's speakable text (as the speaker prepared it, `max_chars` and all), and passes the
 audio out: the service sends 16-bit mono PCM at 16 kHz, which the script resamples to the stream's
 24 kHz and writes to its standard output, paced as it plays (a second ahead at most), just as
 `app-voice-tap --stdout` writes its tap. The speaker then sends it where the tap's audio would go: to
@@ -518,7 +519,15 @@ How it gets the voice: the page's WebSocket carries the request, so the session'
 with the browser: the script never reads, copies, or logs them, and nothing about them leaves the
 page. It finds the helpers the app's read-aloud engine itself uses (its URL builder, the voice and
 speed store, the client platform) through the engine's module, by name, and falls back to plain
-defaults (`buttery`, the speed saved in the page, `desktop_app`) when one isn't found. Each reading
+defaults (`buttery`, the speed saved in the page, `desktop_app`) when one isn't found. The voice,
+speed, and language are the ones the Read aloud button passes, read the same way, from the
+account's settings the page holds (its account context, found in the page's React tree):
+`voice_preference` (the style chosen in Settings > General > Voice: 明るい in Japanese is
+`ja-akarui`), else the store's voice; `voice_speed` (Fast is 1.2); `voice_language_code` (`ja`; none
+when unset). So it always matches the button, and follows any change in Settings at the next
+reading. (The page's voice store alone isn't enough: it keeps only the five English voices, so a
+Japanese style left it at `buttery`, a man's voice, and no language was sent.) `app_voice_voice`
+and `app_voice_language` in the config, when set, override the voice and the language. Each reading
 leaves nothing behind in the page: the socket closes when the reading is done, when the speaker is
 stopped (a new prompt, a new response, `hush`; the script closes it on its way out), or, should the
 script die without closing it, within 8 s, when nobody has drained it; `node app-voice.mjs --stop`
@@ -544,6 +553,9 @@ Where it applies, while the debugger is on:
 Try it by hand (the debugger on; it writes a WAV and touches nothing else):
 
     node plugin/scripts/app-voice.mjs --wav /tmp/voice.wav --text "Testing her voice."
+    node plugin/scripts/app-voice.mjs --wav /tmp/voice.wav --voice ja-akarui --language ja --text "テストです。"
+
+Its last line names the voice, language, and speed it asked for (`ja-akarui (ja) at 1.20`).
 
 ### `output app`: on the Mac
 

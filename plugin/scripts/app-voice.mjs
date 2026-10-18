@@ -5,8 +5,11 @@
 // undocumented endpoint, which may change or go away with any update of the app or the site.
 //
 // Usage: node app-voice.mjs [--port 9229] [--rate 24000] [--lead 1.0] [--max-seconds 900]
-//                           [--wav FILE] [--text TEXT]
+//                           [--voice ID] [--language CODE] [--wav FILE] [--text TEXT]
 //        node app-voice.mjs --stop [--port 9229]
+// The voice, speed, and language are Read aloud's own, from the account's settings in the page (as
+// the button passes them; app-voice-lib.mjs); --voice (a voice ID, "ja-akarui" say) and --language
+// ("ja") override them.
 // The text comes from --text, else standard input. The audio (16-bit mono PCM at --rate; the
 // service sends 16 kHz, resampled here) goes to standard output, as app-voice-tap --stdout's does,
 // paced as it plays (--lead seconds ahead), or, with --wav, into that file as fast as it comes.
@@ -28,6 +31,8 @@ const RATE = Number(opt('--rate', '24000')) || 24000;
 const LEAD = Number(opt('--lead', '1.0'));
 const MAX_SECONDS = Number(opt('--max-seconds', '900')) || 900;
 const WAV = opt('--wav', '');
+const VOICE = opt('--voice', '');
+const LANGUAGE = opt('--language', '');
 const POLL_MS = 60;
 const FIRST_AUDIO_MS = 8000;    // no audio by then: give up (the button's path may still work)
 const SERVICE_RATE = 16000;
@@ -151,11 +156,11 @@ async function speakMode() {
   process.on('SIGINT', () => quit('SIGINT'));
 
   const t0 = Date.now();
-  const started = await evaluate(inPage(`(${pageVoice})('start', ${JSON.stringify({ id: session, text })})`), 15000);
+  const started = await evaluate(inPage(`(${pageVoice})('start', ${JSON.stringify({ id: session, text, voice: VOICE, language: LANGUAGE })})`), 15000);
   if (started.error || !started.id) return exit(2, `could not start: ${started.error || JSON.stringify(started).slice(0, 200)}`);
   pageId = started.page;
   const notes = started.notes?.length ? `; ${started.notes.join(', ')}` : '';
-  const what = `${started.voice} at ${started.speed}, ${started.pieces} piece${started.pieces === 1 ? '' : 's'}${notes}`;
+  const what = `${started.voice}${started.language ? ` (${started.language})` : ''} at ${started.speed}, ${started.pieces} piece${started.pieces === 1 ? '' : 's'}${notes}`;
 
   const resampler = new Resampler(SERVICE_RATE, RATE);
   const pacer = new Pacer(RATE, LEAD);

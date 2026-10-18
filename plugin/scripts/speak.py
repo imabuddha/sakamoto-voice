@@ -55,6 +55,9 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
             for "app" (played on the Mac with ffmpeg), "app-phone" and "app-both" (streamed, and
             played on the Mac for app-both), and "phone" (her voice streamed to the phone, unless
             it wants the text); when that fails, the button (or, for "phone", the text) as before.
+  app_voice_voice, app_voice_language  empty (the default): the voice and language Read aloud
+            uses (the account's settings: Settings > General > Voice). Set, a voice ID ("ja-akarui")
+            or a language code ("ja") that app-voice.mjs asks for instead.
   app_voice_tap  where app-voice-tap is, when it's not in ~/.local/bin or on the PATH.
   ffmpeg    the ffmpeg that plays the app's voice on the Mac, when it's not on the PATH or in
             /opt/homebrew/bin.
@@ -154,7 +157,7 @@ DEFAULTS = {'enabled': True, 'voice_en': '', 'voice_ja': 'Kyoko', 'default_lang'
             'device': '', 'max_chars': 6000,
             'output': 'mac', 'phone_mode': 'text', 'phone_token': '', 'phone': '', 'phone_name': '',
             'app_voice_tap': '', 'dev_path': '', 'phone_remote': '', 'phone_voice': '', 'phone_route': '',
-            'app_voice': True}
+            'app_voice': True, 'app_voice_voice': '', 'app_voice_language': ''}
 OUTPUTS = ('mac', 'phone', 'both', 'app', 'app-both', 'app-phone')
 PHONE_OUTPUTS = ('phone', 'both', 'app-both', 'app-phone')       # the outputs a stop also tells the phone
 PHONE_MODES = ('text', 'audio')
@@ -1621,10 +1624,15 @@ class AppVoice(Tap):
 
     name = 'app-voice'
 
-    def __init__(self, text):
+    def __init__(self, text, cfg=None):
+        override = []
+        for key, flag in (('app_voice_voice', '--voice'), ('app_voice_language', '--language')):
+            value = str((cfg or {}).get(key) or '').strip()
+            if value:
+                override += [flag, value]
         self.proc = subprocess.Popen(
             [node_path() or 'node', app_voice_script(), '--port', str(APP_VOICE_PORT), '--rate', str(STREAM_RATE),
-             '--max-seconds', str(TAP_MAX_SECONDS)],
+             '--max-seconds', str(TAP_MAX_SECONDS)] + override,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.output = b''
         self.sent = 0
@@ -1642,14 +1650,15 @@ class AppVoice(Tap):
         return super().wait_ready(timeout)
 
 
-def start_app_voice(text, who='app voice'):
-    """The app's voice reading `text`, once its first audio has come (AppVoice); None when
+def start_app_voice(text, who='app voice', cfg=None):
+    """The app's voice reading `text`, once its first audio has come (AppVoice; cfg's
+    app_voice_voice and app_voice_language, when set, override Read aloud's); None when
     app-voice.mjs failed (logged, for the button's path, or the text, to take over). The caller has
     checked app_voice_on()."""
     if not text.strip():
         return None
     try:
-        voice = AppVoice(text)
+        voice = AppVoice(text, cfg)
     except OSError as e:
         log(f'{who}: app-voice.mjs did not start: {e}')
         return None
@@ -1832,7 +1841,7 @@ def app_phone(cfg, raw, text, runs, mac_runs, voices, both=False, button=True, s
             sock.close()
 
     who = 'app-both' if both else 'app-phone' if button else 'phone'
-    voice = start_app_voice(text, who) if synth else None
+    voice = start_app_voice(text, who, cfg) if synth else None
     player = None
     if voice and both:
         try:
@@ -1913,7 +1922,7 @@ def app_voice_here(cfg, raw, text):
     alive meanwhile, as for `say`). Under Sakamoto Eyes, the hub gets a copy as it plays (P2.8)."""
     if not text.strip() or not app_voice_on(cfg):
         return None
-    voice = start_app_voice(text, 'app (Mac)')
+    voice = start_app_voice(text, 'app (Mac)', cfg)
     if not voice:
         return None
     try:

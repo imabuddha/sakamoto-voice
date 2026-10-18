@@ -18,7 +18,21 @@
 // platform, the organization parameter) are found through the engine's module: its file's name in
 // the page's preloaded scripts, its imports, and the local names its code uses for them; each
 // missing one falls back to a default (and says so in `notes`). Importing a module the page has
-// loaded returns the page's own instance, so the store holds the voice and speed Read aloud uses.
+// loaded returns the page's own instance.
+//
+// The voice, speed, and language are the ones the Read aloud button passes the engine (its hook in
+// the chat message's toolbar, 2026-10-18), all from the account's settings (Settings > General >
+// Voice), which the page holds as React context (its CurrentAccountProvider; found here by walking
+// the page's React tree to the provider whose value has `account` and `activeOrganization`):
+//   voice     settings.voice_preference, else the voice store's selectedVoice (which holds only the
+//             five English voices, so a Japanese style such as 明るい, "ja-akarui", is never there)
+//   speed     settings.voice_speed when it's a number from 0.5 to 2, else the store's voiceSpeed;
+//             then held to 0.7 to 1.2, as the engine does
+//   language  settings.voice_language_code ("ja"; none when unset, as the button sends none)
+//   organization  the active organization's uuid
+// arg.voice, arg.speed, and arg.language, when given, override these. The account's settings follow
+// any change made in Settings at once (the page updates its context), so each reading uses the
+// current ones.
 //
 // The page is left clean: a session ends when the stream is done, on stop, or when nobody has
 // drained it for WATCHDOG_MS (app-voice.mjs gone); with no session left, the object is removed.
@@ -134,10 +148,39 @@ export async function pageVoice(cmd, arg) {
       return null;
     }
   };
-  const voice = arg.voice || state.selectedVoice || stored('claude-selected-voice') || 'buttery';
-  let speed = Number(arg.speed || state.voiceSpeed || stored('claude-voice-speed') || 1);
+  // The account context, as the button's hook reads it (useContext): the first provider, from the
+  // top of the page's React tree, whose value holds the account and the active organization.
+  let account = null;
+  try {
+    const roots = new Set();
+    for (const el of [document.getElementById?.('root'), ...(document.body?.children || [])]) {
+      if (!el) continue;
+      for (const k of Object.keys(el)) if (k.startsWith('__reactContainer$') && el[k]) roots.add(el[k]);
+    }
+    const stack = [...roots];
+    for (let seen = 0; stack.length && seen < 200000; seen++) {
+      const f = stack.pop();
+      const v = f.memoizedProps && f.memoizedProps.value;
+      if (f.type && typeof f.type === 'object' && v && typeof v === 'object' && 'account' in v && 'activeOrganization' in v) {
+        account = v;
+        break;
+      }
+      if (f.sibling) stack.push(f.sibling);
+      if (f.child) stack.push(f.child);
+    }
+    if (!account) notes.push(roots.size ? 'no account settings' : 'no React root');
+  } catch (e) {
+    notes.push('account: ' + e.message);
+  }
+  const settings = (account && account.account && account.account.settings) || {};
+  const voice = arg.voice || settings.voice_preference || state.selectedVoice || stored('claude-selected-voice') || 'buttery';
+  const saved = settings.voice_speed;
+  let speed = Number(arg.speed || (typeof saved === 'number' && saved >= 0.5 && saved <= 2 ? saved : 0) ||
+    state.voiceSpeed || stored('claude-voice-speed') || 1);
   if (!(speed > 0)) speed = 1;
   speed = Math.min(1.2, Math.max(0.7, speed)).toFixed(2);
+  const language = arg.language || settings.voice_language_code || '';
+  const organization = arg.organization || (account && account.activeOrganization && account.activeOrganization.uuid) || '';
   let platform = 'desktop_app';
   try {
     if (typeof helpers.platform === 'function') platform = helpers.platform() || platform;
@@ -151,8 +194,8 @@ export async function pageVoice(cmd, arg) {
     notes.push('extra: ' + e.message);
   }
   const params = new URLSearchParams({ output_format: 'pcm_16000', voice, tts_speed: speed, client_platform: platform,
-    ...(arg.language ? { language: arg.language } : {}),
-    ...(arg.organization && typeof helpers.orgKey === 'string' ? { [helpers.orgKey]: arg.organization } : {}), ...extra });
+    ...(language ? { language } : {}),
+    ...(organization && typeof helpers.orgKey === 'string' ? { [helpers.orgKey]: organization } : {}), ...extra });
   const path = '/api/ws/text_to_speech/text_stream?' + params;
   let url = null;
   try {
@@ -244,7 +287,7 @@ export async function pageVoice(cmd, arg) {
       tidy();
     }, 1000);
   }
-  return { id, voice, speed, platform, pieces: pieces.length, chars: pieces.reduce((n, p) => n + p.length, 0), notes };
+  return { id, voice, speed, language, platform, pieces: pieces.length, chars: pieces.reduce((n, p) => n + p.length, 0), notes };
 }
 
 // Converts 16-bit mono PCM between rates, a chunk at a time (windowed-sinc interpolation, 2*half
