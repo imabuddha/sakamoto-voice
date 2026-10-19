@@ -1018,12 +1018,20 @@ def stop_speaker():
 
 
 NOTICE_TAGS = ('<task-notification', '<system-reminder', '<local-command', '<bash-')
+# A scheduled (cron) prompt: "[Scheduled usage gauge update — not a message from John.] ...". The
+# harness submits it like a prompt, but nobody typed it.
+SCHEDULED = re.compile(r'\[Scheduled\b[^\]\n]*not a message from', re.I)
 
 
 def is_notice(prompt):
     """Whether a submitted prompt is a notice Claude Code delivered rather than a message typed by
-    you: it starts with one of the harness's tags."""
-    return isinstance(prompt, str) and prompt.lstrip().startswith(NOTICE_TAGS)
+    you: it starts with one of the harness's tags, or is a scheduled prompt (a cron job's:
+    2026-10-18 21:40, one such prompt arrived three seconds into a reply to a heard line and
+    silenced it with `stop`, as if John had spoken)."""
+    if not isinstance(prompt, str):
+        return False
+    prompt = prompt.lstrip()
+    return prompt.startswith(NOTICE_TAGS) or bool(SCHEDULED.match(prompt))
 
 
 def hook_prompt():
@@ -1044,6 +1052,8 @@ def hook_prompt():
 
 def notice_tag(prompt):
     """A notice's tag ("task-notification"), for the log."""
+    if SCHEDULED.match(prompt.lstrip()):
+        return 'scheduled prompt'
     return prompt.lstrip()[1:].split('>', 1)[0].split()[0][:30]
 
 
@@ -2232,7 +2242,7 @@ def main():
         elif cmd == 'stop':
             # From the UserPromptSubmit hook, stdin holds the prompt. Claude Code delivers notices
             # (a background task finishing, say) as prompts too; those neither count as a prompt
-            # from you nor silence the voice.
+            # from you nor silence the voice (nor does a cron job's scheduled prompt).
             prompt = hook_prompt()
             if is_notice(prompt):
                 log(f'prompt: a notice ({notice_tag(prompt)}); the voice carries on')

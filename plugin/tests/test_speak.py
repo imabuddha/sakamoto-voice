@@ -2198,6 +2198,144 @@ class Notices(unittest.TestCase):
         self.assertFalse(speak.is_notice('Okay, try it now.'))
         self.assertFalse(speak.is_notice('I love <b>tags</b>'))
 
+    def test_a_scheduled_prompt_is_a_notice(self):
+        # A cron job's prompt arrives like a typed one; nobody typed it.
+        self.assertTrue(speak.is_notice('[Scheduled usage gauge update — not a message from John.] Call the tool.'))
+        self.assertTrue(speak.is_notice('  [Scheduled Slack check — not a message from John.]\nDo it.'))
+        self.assertEqual(speak.notice_tag('[Scheduled Slack check — not a message from John.]'), 'scheduled prompt')
+        self.assertEqual(speak.notice_tag('<task-notification>\n<task-id>x</task-id>'), 'task-notification')
+        # Ordinary words that merely look similar are typed prompts.
+        self.assertFalse(speak.is_notice('Scheduled maintenance is tonight.'))
+        self.assertFalse(speak.is_notice('[Scheduled] is a word in brackets'))
+        self.assertFalse(speak.is_notice('Is the [Scheduled check — not a message from John] a notice?'))
+
+
+def entry(kind, content, **more):
+    """One line of a session transcript (the fields speak.py reads)."""
+    e = {'type': kind, 'isSidechain': False, 'message': {'role': kind, 'content': content}}
+    e.update(more)
+    return e
+
+
+def prompt(text, **more):
+    return entry('user', text, **more)
+
+
+def say(*texts):
+    return entry('assistant', [{'type': 'text', 'text': t} for t in texts])
+
+
+def tool_call(name='Bash'):
+    return entry('assistant', [{'type': 'tool_use', 'id': 't1', 'name': name, 'input': {}}])
+
+
+def tool_result():
+    return entry('user', [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'ok'}])
+
+
+# Entries a real transcript interleaves, which never count as a turn's text or a prompt.
+NOISE = [{'type': 'attachment', 'isSidechain': False, 'attachment': {'type': 'total_tokens_reminder'}},
+         {'type': 'system', 'subtype': 'stop_hook_summary', 'isSidechain': False},
+         {'type': 'queue-operation', 'operation': 'enqueue', 'content': 'queued'},
+         entry('assistant', [{'type': 'thinking', 'thinking': ''}])]
+CRON = '[Scheduled usage gauge update — not a message from John.] Call the usage tool.'
+EAR = '\U0001F442'
+CHART = '\U0001F4CA'
+
+
+class StopHook(Isolated):
+    """The Stop hook and the UserPromptSubmit hook against small synthetic transcripts: which reply
+    is spoken, and what silences it."""
+
+    def transcript(self, *entries):
+        path = os.path.join(self.dir.name, 'session.jsonl')
+        with open(path, 'w', encoding='utf-8') as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False) + '\n')
+        return path
+
+    def stop_hook(self, *entries, last=None):
+        """Runs the Stop hook; returns the text it launched, or None."""
+        self.write_config({'enabled': True})
+        event = {'transcript_path': self.transcript(*entries)}
+        if last is not None:
+            event['last_assistant_message'] = last
+        with mock.patch.object(speak, 'launch') as launch, mock.patch.object(sys, 'argv', ['speak.py']), \
+             mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(event))):
+            speak.main()
+        return launch.call_args[0][0] if launch.called else None
+
+    def test_the_final_text_of_a_turn_is_spoken(self):
+        self.assertEqual(self.stop_hook(prompt('Hello?'), say('Hi there.')), 'Hi there.')
+
+    def test_text_before_a_tool_call_is_not_spoken(self):
+        self.assertEqual(
+            self.stop_hook(prompt('Fix it.'), say('Looking at the file.'), tool_call(), tool_result(),
+                           say('Fixed.')), 'Fixed.')
+
+    def test_text_before_a_tool_call_is_not_spoken_when_the_turn_ends_with_nothing_to_say(self):
+        self.assertIsNone(
+            self.stop_hook(prompt('Fix it.'), say('Looking at the file.'), tool_call(), tool_result(), say(CHART)))
+        self.assertIn('nothing to say', self.log_text())
+
+    def test_all_the_text_after_the_last_tool_call_is_spoken(self):
+        self.assertEqual(
+            self.stop_hook(prompt('Fix it.'), tool_call(), tool_result(), NOISE[3], say('One.'), say('Two.')),
+            'One.\n\nTwo.')
+
+    def test_a_message_that_arrives_mid_turn_is_where_the_turn_starts(self):
+        self.assertEqual(
+            self.stop_hook(prompt('Fix it.'), say('Working.'), tool_call(), tool_result(),
+                           prompt('The user sent a new message while you were working:\nAlso this.'),
+                           say('Both done.')), 'Both done.')
+
+    def test_an_emoji_only_reply_is_not_spoken(self):
+        self.assertIsNone(self.stop_hook(prompt(EAR + ' Lab: ok'), say(EAR)))
+        self.assertIn('nothing to say', self.log_text())
+        self.assertIsNone(self.stop_hook(prompt(EAR + ' Lab: ok'), say(CHART), last=CHART))
+
+    def test_a_scheduled_turn_ending_in_an_emoji_is_not_spoken(self):
+        self.assertIsNone(self.stop_hook(
+            prompt(EAR + ' Lab: what is on?'), say('Gauges.'),
+            prompt(CRON, isMeta=True), tool_call('usage'), tool_result(), *NOISE, tool_call(), tool_result(),
+            say(CHART)))
+
+    def test_the_reply_to_a_heard_line_is_spoken_though_a_scheduled_turn_follows(self):
+        # 2026-10-18 21:40: Stop for the reply, then (3 s on) a cron prompt and its emoji.
+        heard = prompt(EAR + ' Lab: is the feed on the apps page?')
+        reply = say('Yes, on the apps page.')
+        self.assertEqual(self.stop_hook(heard, *NOISE[:3], reply, NOISE[1]), 'Yes, on the apps page.')
+        self.assertIsNone(self.stop_hook(
+            heard, reply, prompt(CRON, isMeta=True), tool_call('usage'), tool_result(), *NOISE, say(CHART)))
+
+    def run_prompt_hook(self, text):
+        with mock.patch.object(speak, 'hook_prompt', return_value=text), \
+             mock.patch.object(speak, 'stop_speaker') as stop_speaker, \
+             mock.patch.object(speak, 'stop_phone') as stop_phone, \
+             mock.patch.object(sys, 'argv', ['speak.py', 'stop']), redirect_stdout(io.StringIO()):
+            speak.main()
+        return stop_speaker, stop_phone
+
+    def test_a_scheduled_prompt_does_not_silence_the_voice(self):
+        # The bug: the UserPromptSubmit hook took a cron prompt for John typing, and stopped the
+        # reply being read to him (2026-10-18 21:40:03, a reply to a heard line, 3 s in).
+        stop_speaker, stop_phone = self.run_prompt_hook(CRON)
+        stop_speaker.assert_not_called()
+        stop_phone.assert_not_called()
+        self.assertIn('prompt: a notice (scheduled prompt)', self.log_text())
+        self.assertFalse(os.path.exists(speak.PROMPTED))     # and it is no prompt from John
+
+    def test_a_scheduled_prompt_leaves_the_turn_kind_alone(self):
+        self.run_prompt_hook(EAR + ' Lab: hello')
+        self.run_prompt_hook(CRON)
+        self.assertEqual(speak.turn_kind(True), 'heard')
+
+    def test_a_typed_prompt_still_silences_the_voice(self):
+        for text in ('Okay, try it now.', 'Scheduled maintenance tonight.'):
+            stop_speaker, stop_phone = self.run_prompt_hook(text)
+            stop_speaker.assert_called_once()
+            stop_phone.assert_called_once()
+
 
 
 class StartLatency(Isolated):
