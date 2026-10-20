@@ -60,11 +60,12 @@ const inPage = (pageExpr) => `(async () => {
     const wanted = ${JSON.stringify(WANTED_PAGE)};
     if (wanted) {
       const byUrl = pages.filter(w => w.getURL().toLowerCase().includes(wanted));
-      // A session in a window of its own (Open in > New window) is about:blank, titled with its
-      // name: found by that name only, never by default (2026-10-20, Tamamo's session).
-      const windows = webContents.getAllWebContents().filter(w => w.getURL() === 'about:blank'
-        && String(w.getTitle()).trim() !== '' && w.getTitle() !== 'about:blank');
-      pages = byUrl.length ? byUrl : pages.concat(windows).filter(w => String(w.getTitle()).toLowerCase().includes(wanted));
+      const named = byUrl.length ? byUrl : pages.filter(w => String(w.getTitle()).toLowerCase().includes(wanted));
+      // Only the text read here comes from the session; the voice engine is any session page's.
+      // A session in a window of its own (Open in > New window: an about:blank page, no engine of
+      // its own) borrows a session page's (2026-10-20, Tamamo's session); its audio still goes
+      // only where speak.py sends it.
+      if (named.length) pages = named;
     }
     page = pages.find(w => w.isFocused()) || pages[0];
   }
