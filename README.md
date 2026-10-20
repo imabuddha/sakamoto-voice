@@ -245,7 +245,12 @@ the plugin's hooks run in it as in any session) and `speak.py` is that person's 
 - it tells the hub whose it is: `as` in the header of the voice copy on `her-voice.sock`, and in the
   `silent_reply` commands it writes;
 - `SAKAMOTO_RELAY_PAGE` (the text that names its page in the Claude app, as the hub's `owner_sessions`
-  has it) points `app-read.mjs` and `app-voice.mjs` at that session's page, and at no other;
+  has it) points `app-read.mjs` and `app-voice.mjs` at that session's page, and at no other. Open
+  that session in a window of its own (the sidebar's Open in > New window; a split view shares the
+  main session's page) and use its title: such a window is an `about:blank` page named only by its
+  title. It has no read-aloud engine of its own, so `app-voice.mjs` borrows a session page's for the
+  session's text; the audio still goes only to that person's phones. Their phone needs the same
+  pairing code as the Mac;
 - `sakamoto announce "text"` speaks the text on **every** phone the hub lists (`all_phones`), whoever's
   session says it, except in rooms whose level is Mute or Ears off: a hub-wide announcement.
 
