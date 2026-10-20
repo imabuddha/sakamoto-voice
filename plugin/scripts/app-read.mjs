@@ -120,7 +120,11 @@ const expression = `(async () => {
   const wanted = ${JSON.stringify(WANTED_PAGE)};
   if (wanted) {
     const byUrl = pages.filter(w => w.getURL().toLowerCase().includes(wanted));
-    pages = byUrl.length ? byUrl : pages.filter(w => String(w.getTitle()).toLowerCase().includes(wanted));
+    // A session in a window of its own (Open in > New window) is about:blank, titled with its
+      // name: found by that name only, never by default (2026-10-20, Tamamo's session).
+      const windows = webContents.getAllWebContents().filter(w => w.getURL() === 'about:blank'
+        && String(w.getTitle()).trim() !== '' && w.getTitle() !== 'about:blank');
+      pages = byUrl.length ? byUrl : pages.concat(windows).filter(w => String(w.getTitle()).toLowerCase().includes(wanted));
   }
   const page = pages.find(w => w.isFocused()) || pages[0];
   if (!page) return 'no session page';
