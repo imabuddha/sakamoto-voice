@@ -223,6 +223,35 @@ without the button) is also kept, for checking what the Claude app's voice actua
 `~/.config/sakamoto-voice/recordings/latest.wav`, with the response's text in `latest.txt`; the
 one before moves to `previous.*`, and older ones are never kept.
 
+### A session for each person (Sakamoto Eyes hub 0.2.68)
+
+With Sakamoto Eyes (`phone_route`), someone whose phone is their own (the hub's `owners`) can have a
+second Claude Code session of their own, running beside the main one. Start that session with
+`SAKAMOTO_OWNER=<name>` in its environment (a per-folder `.claude/settings.json` with
+`{"env": {"SAKAMOTO_OWNER": "<name>"}}` in a folder of its own, where Claude Code is opened for it;
+the plugin's hooks run in it as in any session) and `speak.py` is that person's session's:
+
+- its replies go **only to that person's phones**, never to the main session's, and the main
+  session's go only to the others'. The hub writes each session's view of the voice route under
+  `routes` in `voice-route.json` (the route, the phones, and the levels as they bear on that session);
+  the file's top level is the main session's. A session the hub wrote no view for, or with none of its
+  phones listed, is silent: never the usual phone, never the Mac's speakers (unless the hub says that
+  person's room hears them);
+- it keeps its own `prompted`, `responded`, `last-prompt`, `speaker.pid`, `app-reading`, and
+  `recordings/` in `~/.config/sakamoto-voice/owners/<name>/` (the name in lowercase, letters and
+  digits, other runs a hyphen), which the hub watches for that session; `config.json` (the settings
+  and the pairing code) and `speak.log` (each line marked `[<name>]`) are shared. Stopping a reply
+  (a new prompt, `hush`) silences only that session's speaker and phones;
+- it tells the hub whose it is: `as` in the header of the voice copy on `her-voice.sock`, and in the
+  `silent_reply` commands it writes;
+- `SAKAMOTO_RELAY_PAGE` (the text that names its page in the Claude app, as the hub's `owner_sessions`
+  has it) points `app-read.mjs` and `app-voice.mjs` at that session's page, and at no other;
+- `sakamoto announce "text"` speaks the text on **every** phone the hub lists (`all_phones`), whoever's
+  session says it, except in rooms whose level is Mute or Ears off: a hub-wide announcement.
+
+Without `SAKAMOTO_OWNER` nothing is different. The setup, from the hub's side, is in Miss Sakamoto's
+README, "A Claude session of their own".
+
 ## The iPhone app
 
 Apple doesn't allow third-party AirPlay receivers, so the phone runs its own small app, Sakamoto
@@ -696,6 +725,7 @@ The tests, all headless (nothing is launched, no audio is captured or played, an
 debugger is never used: the app's voice is mocked, and its page code runs against stand-ins in node):
 
     python3 -m unittest discover -s plugin/tests        # the plugin
+    node --test plugin/tests/app-read-page.test.mjs     # which Claude app page app-read.mjs presses (SAKAMOTO_RELAY_PAGE)
     swift test --package-path ios/SakamotoVoiceKit       # the phone app's core, on the Mac
     mac/build.sh test                                    # app-voice-tap's core
 
