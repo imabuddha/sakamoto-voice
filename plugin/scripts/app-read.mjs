@@ -24,6 +24,10 @@ const WAIT_MS = Number(process.argv[4]) > 0 ? Number(process.argv[4]) : 8000;
 const POLL_MS = 50;         // pause between looks, taken in the main process (the page's timers may be throttled)
 const EARLIER_TEXT = 12;    // letters and digits allowed before the reply (a label at most, not a message)
 const BUSY_GRACE_MS = 2500; // when the reply is drawn but its button is held back (see inPage), give up this soon
+// A person's own session (the hub's `owner_sessions`, SAKAMOTO_OWNER): SAKAMOTO_RELAY_PAGE names its
+// page in the Claude app (a text from its address, best its session ID, or its title); only that
+// page is looked in, and none matching means no session page, never another one's.
+const WANTED_PAGE = (process.env.SAKAMOTO_RELAY_PAGE || '').trim().toLowerCase();
 const matchCode = `const norm = ${norm}; const stripStatus = ${stripStatus}; const messageText = ${messageText}; const findKey = ${findKey};`;
 
 // Runs in the page, once and at once (no timers, no observers: a hidden page throttles them, and
@@ -112,7 +116,12 @@ const inPage = `(() => {
 const expression = `(async () => {
   const req = (typeof require === 'function') ? require : process.mainModule.require.bind(process.mainModule);
   const { webContents } = req('electron');
-  const pages = webContents.getAllWebContents().filter(w => w.getURL().includes('claude.ai/epitaxy/'));
+  let pages = webContents.getAllWebContents().filter(w => w.getURL().includes('claude.ai/epitaxy/'));
+  const wanted = ${JSON.stringify(WANTED_PAGE)};
+  if (wanted) {
+    const byUrl = pages.filter(w => w.getURL().toLowerCase().includes(wanted));
+    pages = byUrl.length ? byUrl : pages.filter(w => String(w.getTitle()).toLowerCase().includes(wanted));
+  }
   const page = pages.find(w => w.isFocused()) || pages[0];
   if (!page) return 'no session page';
   // A locked screen or covered window hides the page: it stops rendering new replies. Keep it

@@ -19,6 +19,8 @@ PATH as README.md describes):
                            here in the Mac's voices (`say -o`), such as a Siri system voice.
   speak.py phone-test ["text"]
                            sends a line to the phone now and reports what happened.
+  speak.py announce "text" speaks the text on every phone the hub lists, whoever's (a hub-wide
+                           announcement; see "One session for each person" below).
 
 Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
   enabled   true/false
@@ -122,6 +124,21 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
   phone_voice  what the phone last said it wants for the Claude app's voice: "stream" or "text"
             (to save mobile data); kept from every answer it gives, empty until it has answered.
             A phone app older than 1.0 never says, and counts as "stream".
+One session for each person (Sakamoto Eyes' hub 0.2.68, `owner_sessions`): a second Claude Code
+session, for someone whose phone is their own (the hub's `owners`), runs with SAKAMOTO_OWNER=<name>
+in its environment (a per-folder .claude/settings.json "env" in its own working folder). Then this
+script is that person's session's: its replies go only to that person's phones (the `routes`
+object of the hub's voice-route.json, for that name: their route, their phones, the levels as they
+bear on them), never to the other session's, and the main session's (no SAKAMOTO_OWNER) go only
+to the others'. It keeps its own prompted, responded, last-prompt, speaker.pid, app-reading, and
+recordings in ~/.config/sakamoto-voice/owners/<name>/ (the name in lowercase, letters and digits
+only), which the hub watches for that session; the settings, the pairing code, and speak.log are
+shared. A reply of that session never plays on the Mac's speakers or on the usual phone unless the
+hub says that person's room hears them. It tells the hub whose it is: `as` in its voice copy's
+header and in its silent_reply commands. `speak.py announce` ignores all this: every phone the
+hub lists (`all_phones`), except in muted rooms. Without SAKAMOTO_OWNER, everything is as before.
+SAKAMOTO_RELAY_PAGE (the text that names the session's page in the Claude app, as the hub's
+`owner_sessions` has it) points app-read.mjs and app-voice.mjs at that session's page.
 Voice markers in a response switch voices: 〔en〕 to voice_en and 〔ja〕 to voice_ja, from the marker
 to the next one or to the end of its paragraph (a blank line), where the default voice resumes.
 Markers are never spoken or shown; unknown ones, such as 〔xx〕, are dropped. They hold on the phone
@@ -136,21 +153,42 @@ import base64, json, os, pty, re, select, shutil, signal, socket, subprocess, sy
 import time, unicodedata, wave
 
 HOME = os.path.expanduser('~/.config/sakamoto-voice')
+
+
+def owner_from_env(environ=None):
+    """The person whose Claude session this is (SAKAMOTO_OWNER, set in that session's environment),
+    as typed; '' for the main session (not set, empty, or "me")."""
+    name = ((environ if environ is not None else os.environ).get('SAKAMOTO_OWNER') or '').strip()
+    return '' if name.casefold() == 'me' else name
+
+
+def owner_slug(name):
+    """A name as a folder name: lowercase, letters and digits only, other runs a hyphen
+    ("Mary Ann" -> "mary-ann"); the hub's OwnerLabel.slug is the same. "owner" when none is left."""
+    out = re.sub(r'[^\w]+|_+', '-', name.lower()).strip('-')
+    return out or 'owner'
+
+
+OWNER = owner_from_env()                   # '' for the main session
+OWNER_KEY = OWNER.casefold()               # how the hub's `routes` name it (its lowercase)
+# This session's own files: the main session's are in HOME; another person's session keeps its own
+# in HOME/owners/<name>, which the hub watches for it. The settings and the log are shared.
+STATE = os.path.join(HOME, 'owners', owner_slug(OWNER)) if OWNER else HOME
 CONFIG = os.path.join(HOME, 'config.json')
-PIDFILE = os.path.join(HOME, 'speaker.pid')
+PIDFILE = os.path.join(STATE, 'speaker.pid')
 # When the last prompt (UserPromptSubmit runs `speak.py stop`) and the last response (the Stop hook)
 # came. A response with no prompt since the one before followed a notice, not a message from you,
 # and the Claude app's Read aloud would read it together with the response before; so for such a
 # response the app's voice is skipped (see speak()).
-PROMPTED = os.path.join(HOME, 'prompted')
-RESPONDED = os.path.join(HOME, 'responded')
+PROMPTED = os.path.join(STATE, 'prompted')
+RESPONDED = os.path.join(STATE, 'responded')
 # What kind of prompt the last one was (note_prompt): {"heard": a 👂 line Sakamoto Eyes' relay
 # typed, "rooms", "at_unix"}, for where a reply goes (phone_route).
-LAST_PROMPT = os.path.join(HOME, 'last-prompt')
+LAST_PROMPT = os.path.join(STATE, 'last-prompt')
 # While the Claude app's Read aloud reads a response (app_read clicked): {"started", "ends" (Unix
 # times; the end estimated from the text), "text"}. Its speaker has exited by then, so this is how
 # Sakamoto Eyes' hub knows her voice is on (for its echo guard and barge-in).
-APP_READING = os.path.join(HOME, 'app-reading')
+APP_READING = os.path.join(STATE, 'app-reading')
 LOG = os.path.join(HOME, 'speak.log')
 LOG_MAX = 64 * 1024          # then speak.log becomes speak.log.1, replacing the one before
 DEFAULTS = {'enabled': True, 'voice_en': '', 'voice_ja': 'Kyoko', 'default_lang': 'auto', 'rate': 0,
@@ -166,6 +204,8 @@ PHONE_VOICES = ('stream', 'text')     # what the phone wants for the Claude app'
 
 def config():
     os.makedirs(HOME, exist_ok=True)
+    if STATE != HOME:
+        os.makedirs(STATE, exist_ok=True)
     cfg = dict(DEFAULTS)
     try:
         with open(CONFIG) as f:
@@ -222,8 +262,11 @@ def on_this_mac(addresses):
     return bool(addresses) and all(a.startswith('127.') or a.startswith('[::1]') for a in addresses)
 
 
-def route_file(cfg):
-    """Sakamoto Eyes' voice-route.json (phone_route) as a dict; {} when off or unreadable."""
+def route_file(cfg, whole=False):
+    """Sakamoto Eyes' voice-route.json (phone_route) as a dict; {} when off or unreadable. As
+    this session sees it: the main session's is the file itself; a person's own session
+    (SAKAMOTO_OWNER) sees what the hub wrote for it under `routes`, and {} (no route, no phones, no
+    levels: it stays silent) when the hub wrote none. `whole`: the file itself, for an announcement."""
     path = cfg.get('phone_route') or ''
     if not path:
         return {}
@@ -232,7 +275,14 @@ def route_file(cfg):
             route = json.load(f)
     except (OSError, ValueError):
         return {}
-    return route if isinstance(route, dict) else {}
+    if not isinstance(route, dict):
+        return {}
+    if OWNER and not whole:
+        routes = route.get('routes')
+        view = next((v for k, v in routes.items() if isinstance(k, str) and k.casefold() == OWNER_KEY),
+                    None) if isinstance(routes, dict) else None
+        return view if isinstance(view, dict) else {}
+    return route
 
 
 def voice_route(cfg, now=None):
@@ -257,13 +307,13 @@ def route_addresses(cfg, now=None):
     return route['addresses'] if route else []
 
 
-def hub_levels(cfg, now=None):
+def hub_levels(cfg, now=None, whole=False):
     """Sakamoto Eyes' listening levels as they bear on her voice (voice-route.json's "level",
     "levels", and "mac_silent", hub 0.2.35; "mac_rooms" and "his_room", hub 0.2.36), as
     {"level", "levels", "mac_silent", "mac_rooms", "his_room"}; None when the
     hub doesn't say, or isn't running (its status.json, next to voice-route.json, older than
     LEVELS_MAX_AGE or missing). Malformed fields count as Normal and not silent."""
-    route = route_file(cfg)
+    route = route_file(cfg, whole)
     if 'level' not in route and 'levels' not in route:
         return None
     status = os.path.join(os.path.dirname(os.path.expanduser(cfg.get('phone_route') or '')), 'status.json')
@@ -301,10 +351,12 @@ def last_heard_rooms():
     return [r for r in rooms if isinstance(r, str) and r] if isinstance(rooms, list) else []
 
 
-def listed_phones(cfg):
+def listed_phones(cfg, whole=False):
     """The phones the hub lists as connected and playing her voice (voice-route.json's
-    "phones"), each {"name", "room", "addresses", "fallback"}; [] when none or off."""
-    phones = route_file(cfg).get('phones')
+    "phones"), each {"name", "room", "addresses", "fallback"}; [] when none or off. `whole`: every
+    phone the hub lists, whoever's (`all_phones`, else `phones`), for an announcement."""
+    route = route_file(cfg, whole)
+    phones = route.get('all_phones') if whole and isinstance(route.get('all_phones'), list) else route.get('phones')
     if not isinstance(phones, list):
         return []
     return [dict(p, addresses=addresses_of(p), name=text_of(p.get('name'), 'a phone'))
@@ -329,7 +381,7 @@ def note_prompt(prompt, now=None):
     """Keeps what kind of prompt the last one was (LAST_PROMPT), for the response's turn."""
     rooms = heard_rooms(prompt)
     try:
-        os.makedirs(HOME, exist_ok=True)
+        os.makedirs(STATE, exist_ok=True)
         with open(LAST_PROMPT, 'w', encoding='utf-8') as f:
             json.dump({'heard': rooms is not None, 'rooms': rooms or [], 'at_unix': now or time.time()}, f)
     except OSError as e:
@@ -422,8 +474,9 @@ def in_rooms(cfg, levels, rooms):
         return everywhere(cfg, levels)
     phones = [p for p in listed_phones(cfg)
               if any(same_room(p.get('room'), r) for r in rooms) and not room_silent(levels, text_of(p.get('room'), ''))]
+    # (Another person's session: the Mac's speakers only where the hub names their room.)
     mac_here = any(same_room(m, r) for m in levels['mac_rooms'] for r in rooms) \
-        if levels['mac_rooms'] else not phones
+        if levels['mac_rooms'] else not phones and not OWNER
     return speakers(cfg, levels, phones, mac_here and not levels['mac_silent'])
 
 
@@ -445,7 +498,8 @@ def everywhere(cfg, levels):
         return speakers(cfg, levels, phones, mac_here and not levels['mac_silent'], unlisted=not phones)
     phones = [p for p in listed_phones(cfg)
               if p.get('silent') is not True and not room_silent(levels, text_of(p.get('room'), ''))]
-    return speakers(cfg, levels, phones, not levels['mac_silent'], unlisted=not listed_phones(cfg))
+    # (Another person's session never uses the Mac's speakers for what no room asked for.)
+    return speakers(cfg, levels, phones, not levels['mac_silent'] and not OWNER, unlisted=not listed_phones(cfg))
 
 
 def speakers(cfg, levels, phones, mac_ok, unlisted=False):
@@ -475,13 +529,33 @@ def speakers(cfg, levels, phones, mac_ok, unlisted=False):
     return dict(cfg, silent=True)
 
 
+def announcement(cfg):
+    """A hub-wide announcement (`speak.py announce`): every phone the hub lists, whoever's, except in
+    rooms muted for everyone (a room's own Mute or Ears off), and the Mac's side of `output` unless
+    its speakers are in a muted room. Without the hub's levels: every phone it lists and the Mac as
+    `output` says (the usual phone and the Mac, with no hub). No route, no room he is in: it goes
+    everywhere."""
+    levels = hub_levels(cfg, whole=True)
+    if levels is None:
+        phones = listed_phones(cfg, whole=True)
+        if phones:
+            return dict(cfg, targets=[dict(p, fallback=text_of(p.get('fallback'), 'any')) for p in phones])
+        return cfg
+    phones = [p for p in listed_phones(cfg, whole=True)
+              if not room_silent(levels, text_of(p.get('room'), ''))]
+    return speakers(cfg, levels, phones, not levels['mac_silent'], unlisted=not listed_phones(cfg, whole=True))
+
+
 def show_silently(cfg, room, text):
     """Rule C: asks Sakamoto Eyes' hub to show her reply silently in `room` (its commands.jsonl,
     next to voice-route.json: {"cmd": "silent_reply", "room", "text"}); its sign for a few words,
     its board for more (the hub decides). One append, so a line is never split; the file is
     created when missing (the hub reads it once it exists), but never its folder (the hub's)."""
     path = os.path.join(os.path.dirname(os.path.expanduser(cfg.get('phone_route') or '')), 'commands.jsonl')
-    line = json.dumps({'cmd': 'silent_reply', 'room': room, 'text': text[:SILENT_TEXT_MAX]}, ensure_ascii=False) + '\n'
+    command = {'cmd': 'silent_reply', 'room': room, 'text': text[:SILENT_TEXT_MAX]}
+    if OWNER:
+        command['as'] = OWNER          # whose session shows it (the hub's `as`)
+    line = json.dumps(command, ensure_ascii=False) + '\n'
     try:
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
@@ -497,6 +571,17 @@ def show_silently(cfg, room, text):
 SILENT_TEXT_MAX = 8000      # the hub's board holds this much (Signboard.textMax)
 
 
+def owner_only(cfg):
+    """A person's own session (SAKAMOTO_OWNER) speaks only where the hub named a place for it (a
+    phone of theirs, their room's silence, the Mac when their room hears it): with none (no hub
+    running, no route for it, or none of their phones connected) it is silent, never the usual
+    phone or the Mac's speakers, which are the main session's."""
+    if not OWNER or cfg.get('silent_in') or cfg.get('silent') or cfg.get('targets') or cfg.get('on_mac'):
+        return cfg
+    log('voice route: no device of the owner to speak on; silent')
+    return dict(cfg, silent=True)
+
+
 def target_name(target):
     return target['name'] if target else 'the phone'
 
@@ -509,7 +594,8 @@ def log(message):
         if os.path.exists(LOG) and os.path.getsize(LOG) > LOG_MAX:
             os.replace(LOG, LOG + '.1')
         with open(LOG, 'a', encoding='utf-8') as f:
-            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + message.replace('\n', ' ') + '\n')
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + (f'[{OWNER}] ' if OWNER else '')
+                    + message.replace('\n', ' ') + '\n')
     except OSError:
         pass
 
@@ -991,8 +1077,10 @@ def stop_phone(cfg):
     it (each at its first address)."""
     if cfg.get('output') not in PHONE_OUTPUTS or not cfg.get('phone_token'):
         return
+    # (Another person's session stops only the phones the hub lists for it, never the usual phone,
+    # which is the main session's.)
     addresses = route_addresses(cfg)[:1] + [addresses_of(p)[0] for p in listed_phones(cfg)] \
-        + [cfg.get('phone_remote') or cfg.get('phone')]
+        + ([] if OWNER else [cfg.get('phone_remote') or cfg.get('phone')])
     for address in dict.fromkeys(a for a in addresses if a):
         try:
             exchange(address, message(cfg['phone_token'], 'stop'), timeout=1.5)
@@ -1387,6 +1475,8 @@ def voice_clock(cfg, text, rate=STREAM_RATE, mac=False, audio=True, phones=None)
         sock.settimeout(0.5)
         sock.connect(path)
         header = {'text': text, 'rate': rate, 'format': 'pcm16', 'channels': 1, 'mac': bool(mac)}
+        if OWNER:
+            header['as'] = OWNER       # whose reply it is: the hub times its cues for that person's phones
         if not audio:
             header['audio'] = False
         if phones:
@@ -1721,7 +1811,7 @@ class MacPlayer:
         return self.proc.returncode
 
 
-RECORDINGS = os.path.join(HOME, 'recordings')
+RECORDINGS = os.path.join(STATE, 'recordings')
 
 
 def recording_path(text):
@@ -2097,7 +2187,7 @@ def speak(path, prompted=True, turn=None):
         os.remove(path)
     raw = text
     turn = turn or ('typed' if prompted else 'notice')
-    cfg = routed(config(), turn)
+    cfg = announcement(config()) if turn == 'announce' else owner_only(routed(config(), turn))
     if cfg.get('silent_in') or cfg.get('silent'):
         # John, 2026-10-17 15:24: a muted room hears her nowhere; its own screens show the reply.
         if cfg.get('silent_in'):
@@ -2291,6 +2381,9 @@ def main():
                   else "audio, in the Mac's voices.")
         elif cmd == 'phone-test':
             return phone_test(' '.join(args[1:]) or SAMPLE)
+        elif cmd == 'announce' and ' '.join(args[1:]).strip():
+            # Hub-wide: every phone the hub lists, whoever's session this is (speak(), turn 'announce').
+            launch(' '.join(args[1:]), prompted=False, turn='announce')
         else:
             print(__doc__)
             return 2

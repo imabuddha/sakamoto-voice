@@ -37,6 +37,9 @@ const POLL_MS = 60;
 const FIRST_AUDIO_MS = 8000;    // no audio by then: give up (the button's path may still work)
 const SERVICE_RATE = 16000;
 
+// A person's own session (SAKAMOTO_OWNER): its page in the Claude app, named as in app-read.mjs.
+const WANTED_PAGE = (process.env.SAKAMOTO_RELAY_PAGE || '').trim().toLowerCase();
+
 let ws = null;
 let nextId = 1;
 const pending = new Map();
@@ -53,7 +56,12 @@ const inPage = (pageExpr) => `(async () => {
   const { webContents } = req('electron');
   let page = ${pageId === null ? 'null' : `webContents.fromId(${pageId})`};
   if (!page) {
-    const pages = webContents.getAllWebContents().filter(w => w.getURL().includes('claude.ai/epitaxy/'));
+    let pages = webContents.getAllWebContents().filter(w => w.getURL().includes('claude.ai/epitaxy/'));
+    const wanted = ${JSON.stringify(WANTED_PAGE)};
+    if (wanted) {
+      const byUrl = pages.filter(w => w.getURL().toLowerCase().includes(wanted));
+      pages = byUrl.length ? byUrl : pages.filter(w => String(w.getTitle()).toLowerCase().includes(wanted));
+    }
     page = pages.find(w => w.isFocused()) || pages[0];
   }
   if (!page || page.isDestroyed()) return { error: 'no session page' };

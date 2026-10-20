@@ -5,7 +5,7 @@
 The settings, the pid file, and the log go to a temporary folder, never ~/.config. The tests
 with a stand-in phone use the loopback interface and are skipped where they can't listen.
 """
-import base64, io, json, os, re, socket, sys, tempfile, threading, time, unittest, wave
+import base64, io, json, os, re, socket, subprocess, sys, tempfile, threading, time, unittest, wave
 from contextlib import redirect_stdout
 from unittest import mock
 
@@ -3237,3 +3237,314 @@ process.exit(0);
         self.assertEqual(out['plainUrl'], 'wss://claude.example/api/ws/text_to_speech/text_stream?output_format=pcm_16000'
                                           '&voice=buttery&tts_speed=0.90&client_platform=desktop_app')
         self.assertEqual(out['cleanAtLast'], 'undefined')
+
+
+# ---- a session for each person (Sakamoto Eyes' hub 0.2.68) -------------------------------------
+
+class OwnerSessions(Isolated):
+    """A second Claude session, for someone whose phone is their own (SAKAMOTO_OWNER=Tamamo): its
+    replies go only to that person's phones, the main session's only to the others', each keeps its
+    own files, and an announcement goes everywhere. The hub writes each session's view of the
+    voice route under `routes`; without SAKAMOTO_OWNER everything is as it was."""
+
+    LAB = VoiceRules.LAB
+    NERDVANA = VoiceRules.NERDVANA
+    TAMAMO = {'name': 'iPhone', 'room': 'Tamamo', 'addresses': ['192.168.0.99:47811'], 'fallback': 'any'}
+    write_hub = VoiceRules.write_hub
+    commands = VoiceRules.commands
+    cfg = VoiceRules.cfg
+    run_speaker = SpeakerTests.run_speaker
+
+    def setUp(self):
+        super().setUp()
+        self.as_owner('Tamamo')
+
+    def as_owner(self, name):
+        for attribute, value in (('OWNER', name), ('OWNER_KEY', name.casefold())):
+            p = mock.patch.object(speak, attribute, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def main_session(self):
+        """Inside `with`: the main session (no SAKAMOTO_OWNER)."""
+        patches = [mock.patch.object(speak, 'OWNER', ''), mock.patch.object(speak, 'OWNER_KEY', '')]
+
+        class Both:
+            def __enter__(self_):
+                for p in patches:
+                    p.start()
+
+            def __exit__(self_, *exc):
+                for p in reversed(patches):
+                    p.stop()
+        return Both()
+
+    def write_views(self, hers=None, his=None, all_phones=True, **hub):
+        """The hub's file with both views: the main session's (top level: the Lab and Nerdvana
+        phones) and Tamamo's under routes (the phone in her room), and every phone."""
+        path = self.write_hub(his, phones=[self.LAB, self.NERDVANA], **hub)
+        with open(path) as f:
+            data = json.load(f)
+        view = {'level': 'normal', 'levels': {'Tamamo': 'normal', 'Lab': 'normal', 'Nerdvana': 'normal'},
+                'mac_silent': False, 'mac_rooms': [], 'phones': [self.TAMAMO]}
+        view.update(hers or {})
+        data['routes'] = {'tamamo': view}
+        if all_phones:
+            data['all_phones'] = [self.LAB, self.NERDVANA, self.TAMAMO]
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        return path
+
+    HER_ROUTE = {'room': 'Tamamo', 'phone': 'iPhone', 'addresses': ['192.168.0.99:47811'], 'fallback': 'any'}
+
+    # Who is whose
+
+    def test_the_owner_is_read_from_the_environment(self):
+        self.assertEqual(speak.owner_from_env({}), '')
+        self.assertEqual(speak.owner_from_env({'SAKAMOTO_OWNER': ''}), '')
+        self.assertEqual(speak.owner_from_env({'SAKAMOTO_OWNER': ' Tamamo '}), 'Tamamo')
+        self.assertEqual(speak.owner_from_env({'SAKAMOTO_OWNER': 'Me'}), '')       # the main user's, by name
+        self.assertEqual(speak.owner_slug('Tamamo'), 'tamamo')
+        self.assertEqual(speak.owner_slug('Mary Ann'), 'mary-ann')
+        self.assertEqual(speak.owner_slug('  Sam!! '), 'sam')
+        self.assertEqual(speak.owner_slug('たまも'), 'たまも')
+        self.assertEqual(speak.owner_slug('???'), 'owner')
+        self.assertEqual(speak.owner_slug('a_b'), 'a-b')
+
+    def test_a_session_keeps_its_own_files_in_its_own_folder(self):
+        # Importing the script with the variable set (a Stop hook is a new process each time).
+        def paths(owner):
+            env = dict(os.environ, HOME=self.dir.name)
+            env.pop('SAKAMOTO_OWNER', None)
+            if owner is not None:
+                env['SAKAMOTO_OWNER'] = owner
+            code = ('import sys; sys.path.insert(0, %r); import speak, json; print(json.dumps([speak.OWNER, speak.STATE, '
+                    'speak.PIDFILE, speak.PROMPTED, speak.RESPONDED, speak.LAST_PROMPT, speak.APP_READING, '
+                    'speak.RECORDINGS, speak.CONFIG, speak.LOG]))' % os.path.dirname(speak.__file__))
+            out = subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True, check=True)
+            return json.loads(out.stdout)
+        home = os.path.join(self.dir.name, '.config', 'sakamoto-voice')
+        main = paths(None)
+        self.assertEqual(main, ['', home, home + '/speaker.pid', home + '/prompted', home + '/responded',
+                                home + '/last-prompt', home + '/app-reading', home + '/recordings',
+                                home + '/config.json', home + '/speak.log'])
+        hers = paths('Tamamo')
+        folder = home + '/owners/tamamo'
+        self.assertEqual(hers, ['Tamamo', folder, folder + '/speaker.pid', folder + '/prompted', folder + '/responded',
+                                folder + '/last-prompt', folder + '/app-reading', folder + '/recordings',
+                                home + '/config.json', home + '/speak.log'])      # the settings and the log are shared
+        self.assertEqual(paths('me'), main)
+
+    def test_the_hooks_leave_their_marks_in_the_sessions_folder(self):
+        folder = os.path.join(self.dir.name, 'owners', 'tamamo')
+        for name in ('PIDFILE', 'PROMPTED', 'RESPONDED', 'LAST_PROMPT', 'APP_READING'):
+            p = mock.patch.object(speak, name, os.path.join(folder, getattr(speak, name).rsplit('/', 1)[1]))
+            p.start()
+            self.addCleanup(p.stop)
+        self.write_config({'enabled': True})
+        event = {'last_assistant_message': 'Hi there.'}
+        with mock.patch.object(speak, 'launch') as launch, mock.patch.object(sys, 'argv', ['speak.py']), \
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(event))):
+            speak.main()
+        self.assertTrue(os.path.exists(os.path.join(folder, 'responded')))
+        self.assertFalse(os.path.exists(os.path.join(self.dir.name, 'responded')))
+        launch.assert_called_once()
+        with mock.patch.object(speak, 'hook_prompt', return_value='👂 Tamamo: what is the weather'), \
+                mock.patch.object(speak, 'exchange'), mock.patch.object(sys, 'argv', ['speak.py', 'stop']), \
+                redirect_stdout(io.StringIO()):
+            speak.main()
+        self.assertTrue(os.path.exists(os.path.join(folder, 'prompted')))
+        self.assertEqual(speak.heard_rooms('👂 Tamamo: what is the weather'), ['Tamamo'])
+        self.assertEqual(speak.turn_kind(True), 'heard')
+        with open(os.path.join(folder, 'last-prompt')) as f:
+            self.assertEqual(json.load(f)['rooms'], ['Tamamo'])
+        self.assertIn('[Tamamo] prompt: a heard line', self.log_text())
+
+    # What each session sees of the hub's file
+
+    def test_each_session_sees_its_own_view(self):
+        path = self.write_views(his={'room': 'Lab', 'phone': 'Lab XS', 'addresses': ['192.168.1.40:47811']})
+        cfg = self.cfg(path)
+        self.assertEqual([p['name'] for p in speak.listed_phones(cfg)], ['iPhone'])
+        self.assertEqual(speak.route_file(cfg).get('phones'), [self.TAMAMO])
+        self.assertEqual([p['name'] for p in speak.listed_phones(cfg, whole=True)], ['Lab XS', 'iPhone 16pro', 'iPhone'])
+        self.assertEqual(speak.hub_levels(cfg)['his_room'], '')             # a session of someone's has no his_room
+        with self.main_session():
+            # The main session reads the file itself: the phones the hub lists for it, its route.
+            self.assertEqual([p['name'] for p in speak.listed_phones(cfg)], ['Lab XS', 'iPhone 16pro'])
+            self.assertEqual(speak.voice_route(cfg)['room'], 'Lab')
+
+    def test_a_session_the_hub_wrote_no_view_for_has_nothing(self):
+        path = self.write_views()
+        self.as_owner('Sam')
+        cfg = self.cfg(path)
+        self.assertEqual(speak.route_file(cfg), {})
+        self.assertEqual(speak.listed_phones(cfg), [])
+        self.assertIsNone(speak.voice_route(cfg))
+        self.assertIsNone(speak.hub_levels(cfg))
+
+    def test_the_view_is_found_in_any_case(self):
+        path = self.write_views()
+        with open(path) as f:
+            data = json.load(f)
+        data['routes'] = {'TAMAMO': data['routes']['tamamo']}
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        self.assertEqual([p['name'] for p in speak.listed_phones(self.cfg(path))], ['iPhone'])
+
+    # Where her replies go
+
+    def test_a_reply_to_her_line_goes_to_her_phone_only(self):
+        path = self.write_views(his={'room': 'Lab', 'phone': 'Lab XS', 'addresses': ['192.168.1.40:47811']})
+        with open(speak.LAST_PROMPT, 'w') as f:
+            json.dump({'heard': True, 'rooms': ['Tamamo'], 'at_unix': speak.time.time()}, f)
+        with open(path) as f:
+            data = json.load(f)
+        data['routes']['tamamo'].update(self.HER_ROUTE, at_unix=speak.time.time() - 5)
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        routed = speak.owner_only(speak.routed(self.cfg(path), 'heard'))
+        self.assertEqual([t['name'] for t in routed['targets']], ['iPhone'])
+        self.assertEqual(routed['targets'][0]['addresses'], ['192.168.0.99:47811'])
+        self.assertEqual(routed['output'], 'app-phone')            # the Mac stays quiet
+
+    def test_her_reply_to_a_line_with_no_route_yet_goes_to_her_rooms_phones_by_the_label(self):
+        path = self.write_views()
+        with open(speak.LAST_PROMPT, 'w') as f:
+            json.dump({'heard': True, 'rooms': ['Tamamo'], 'at_unix': speak.time.time()}, f)
+        routed = speak.owner_only(speak.routed(self.cfg(path), 'heard'))
+        self.assertEqual([t['name'] for t in routed['targets']], ['iPhone'])
+
+    def test_her_typed_prompts_reply_and_her_notices_go_to_her_phones_never_the_mac_or_his_phones(self):
+        path = self.write_views()
+        for turn in ('typed', 'notice'):
+            for output in ('mac', 'both', 'app', 'app-both', 'app-phone', 'phone'):
+                routed = speak.owner_only(speak.routed(self.cfg(path, output), turn))
+                if output in ('mac', 'app'):
+                    self.assertTrue(routed.get('silent'), (turn, output, routed))      # no phone output: nothing
+                    self.assertNotIn('on_mac', routed)
+                else:
+                    self.assertEqual([t['name'] for t in routed['targets']], ['iPhone'], (turn, output))
+                    self.assertNotIn('on_mac', routed)
+                    self.assertIn(routed['output'], ('phone', 'app-phone'))            # the Mac quiet
+
+    def test_with_none_of_her_phones_listed_nothing_plays_not_even_on_the_mac(self):
+        path = self.write_views(hers={'phones': []})
+        for turn in ('typed', 'notice'):
+            for output in ('mac', 'app-phone', 'app-both'):
+                routed = speak.owner_only(speak.routed(self.cfg(path, output), turn))
+                self.assertTrue(routed.get('silent'), (turn, output, routed))
+                self.assertNotIn('on_mac', routed)
+
+    def test_her_room_muted_shows_her_reply_there_as_hers(self):
+        path = self.write_views(hers={'level': 'normal', 'levels': {'Tamamo': 'mute'},
+                                      'phones': [dict(self.TAMAMO, silent=True)]})
+        with open(speak.LAST_PROMPT, 'w') as f:
+            json.dump({'heard': True, 'rooms': ['Tamamo'], 'at_unix': speak.time.time()}, f)
+        run, deliver = self.run_speaker(self.cfg(path), text='13:47 Muted.', turn='heard')
+        run.assert_not_called()
+        deliver.assert_not_called()
+        self.assertEqual(self.commands(), [{'cmd': 'silent_reply', 'room': 'Tamamo', 'text': '13:47 Muted.',
+                                            'as': 'Tamamo'}])
+        self.assertIn('[Tamamo] voice route (heard): Tamamo is muted; silent everywhere; shown there', self.log_text())
+
+    def test_the_main_sessions_silent_reply_names_no_one(self):
+        path = self.write_views(his={'room': 'Nerdvana', 'phone': 'iPhone 16pro', 'addresses': ['192.168.0.17:47811']},
+                                levels={'Nerdvana': 'mute'})
+        with self.main_session():
+            self.assertTrue(speak.show_silently(self.cfg(path), 'Nerdvana', 'Hello.'))
+        self.assertEqual(self.commands(), [{'cmd': 'silent_reply', 'room': 'Nerdvana', 'text': 'Hello.'}])
+
+    def test_no_hub_no_route_means_silence_for_her_session_not_the_usual_phone(self):
+        # The main session's cfg (no phone_route, or a hub that isn't there) speaks as output says; hers doesn't.
+        for cfg in ({'output': 'mac', 'phone_route': ''},
+                    {'output': 'phone', 'phone_token': '123456', 'phone': 'x:1',
+                     'phone_route': os.path.join(self.dir.name, 'gone.json')}):
+            self.assertTrue(speak.owner_only(speak.routed(cfg, 'typed')).get('silent'))
+            with self.main_session():
+                self.assertEqual(speak.owner_only(speak.routed(cfg, 'typed')), cfg)
+        run, deliver = self.run_speaker({'output': 'mac', 'default_lang': 'en'})
+        run.assert_not_called()
+        deliver.assert_not_called()
+        self.assertIn('[Tamamo] voice route: no device of the owner to speak on; silent', self.log_text())
+        self.assertFalse(os.path.exists(speak.PIDFILE))
+
+    def test_the_main_session_is_as_before_with_the_owner_unset(self):
+        path = self.write_views(his={'room': 'Lab', 'phone': 'Lab XS', 'addresses': ['192.168.1.40:47811']})
+        with self.main_session():
+            routed = speak.owner_only(speak.routed(self.cfg(path), 'heard'))
+            self.assertEqual([t['name'] for t in routed['targets']], ['Lab XS'])
+            self.assertEqual(speak.owner_only({'output': 'mac'}), {'output': 'mac'})
+            typed = speak.owner_only(speak.routed(self.cfg(path), 'typed'))
+            self.assertEqual(sorted(t['name'] for t in typed['targets']), ['Lab XS', 'iPhone 16pro'])    # his phones only
+
+    # Stopping, and telling the hub whose it is
+
+    def test_her_stop_silences_her_phones_and_never_the_usual_phone(self):
+        path = self.write_views(his={'room': 'Lab', 'phone': 'Lab XS', 'addresses': ['192.168.1.40:47811']})
+        self.write_config({'phone_token': '123456', 'phone': 'usual.local:47811', 'phone_remote': '100.64.0.9:47811',
+                           'phone_route': path, 'output': 'app-phone'})
+        with mock.patch.object(speak, 'exchange') as exchange:
+            speak.stop_phone(speak.config())
+        self.assertEqual([c[0][0] for c in exchange.call_args_list], ['192.168.0.99:47811'])
+        with self.main_session(), mock.patch.object(speak, 'exchange') as exchange:
+            speak.stop_phone(speak.config())
+        self.assertEqual([c[0][0] for c in exchange.call_args_list],
+                         ['192.168.1.40:47811', '192.168.0.17:47811', '100.64.0.9:47811'])
+
+    def test_the_voice_copy_says_whose_reply_it_is(self):
+        try:
+            hub = HubListener(self.dir.name)
+        except OSError as e:
+            self.skipTest(f'cannot listen on a Unix socket here: {e}')
+        self.addCleanup(hub.close)
+        cfg = dict(speak.DEFAULTS, phone_route=hub.route)
+        speak.voice_clock(cfg, 'Hi').close()
+        self.assertTrue(hub.wait(1))
+        self.assertEqual(hub.header(0), {'text': 'Hi', 'rate': speak.STREAM_RATE, 'format': 'pcm16', 'channels': 1,
+                                         'mac': False, 'as': 'Tamamo'})
+        with self.main_session():
+            speak.voice_clock(cfg, 'Hi').close()
+        self.assertTrue(hub.wait(2))
+        self.assertNotIn('as', hub.header(1))
+
+    # An announcement
+
+    def test_an_announcement_goes_to_every_phone_the_hub_lists_except_in_muted_rooms(self):
+        path = self.write_views(levels={'Nerdvana': 'mute'}, level='normal')
+        with open(path) as f:
+            data = json.load(f)
+        data['all_phones'][1]['silent'] = True       # the hub marks a muted room's phone
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        cfg = self.cfg(path, 'app-phone')
+        for owner in ('Tamamo', ''):
+            with mock.patch.object(speak, 'OWNER', owner), mock.patch.object(speak, 'OWNER_KEY', owner.casefold()):
+                routed = speak.announcement(cfg)
+                self.assertEqual(sorted(t['name'] for t in routed['targets']), ['Lab XS', 'iPhone'], owner)
+
+    def test_an_announcement_without_the_hubs_levels_goes_to_every_listed_phone(self):
+        path = os.path.join(self.dir.name, 'voice-route.json')
+        with open(path, 'w') as f:
+            json.dump({'phones': [self.LAB], 'all_phones': [self.LAB, self.TAMAMO]}, f)
+        routed = speak.announcement({'phone_route': path, 'output': 'app-phone'})
+        self.assertEqual([t['name'] for t in routed['targets']], ['Lab XS', 'iPhone'])
+        self.assertEqual(speak.announcement({'output': 'mac'}), {'output': 'mac'})
+
+    def test_announce_hands_the_speaker_an_announcement_turn(self):
+        with mock.patch.object(speak, 'launch') as launch, \
+                mock.patch.object(sys, 'argv', ['speak.py', 'announce', 'Dinner', 'is', 'ready']), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(speak.main(), 0)
+        launch.assert_called_once_with('Dinner is ready', prompted=False, turn='announce')
+        with mock.patch.object(speak, 'launch') as launch, mock.patch.object(sys, 'argv', ['speak.py', 'announce']), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(speak.main(), 2)          # no text: the usage
+        launch.assert_not_called()
+
+    def test_the_announcement_turn_goes_to_every_phone_whoever_asks(self):
+        path = self.write_views()
+        run, deliver = self.run_speaker(self.cfg(path, 'phone'), text='Dinner is ready.', turn='announce')
+        run.assert_not_called()
+        self.assertEqual(sorted(t['name'] for t in deliver.call_args[0][0]['targets']),
+                         ['Lab XS', 'iPhone', 'iPhone 16pro'])
