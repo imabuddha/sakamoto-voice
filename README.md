@@ -561,7 +561,9 @@ account's settings the page holds (its account context, found in the page's Reac
 `ja-akarui`), else the store's voice; `voice_speed` (Fast is 1.2); `voice_language_code` (`ja`; none
 when unset). So it matches the button, and follows any change in Settings at the next reading,
 and `app_voice_speed` in the config (0.5 to 1.5; 0, the default, keeps the account's) can read faster
-than the app's settings go (its engine holds them to 0.7 to 1.2; the service refuses above 1.5). (The page's voice store
+than the app's settings go (its engine holds them to 0.7 to 1.2; the service refuses above 1.5).
+A person's own session (`SAKAMOTO_OWNER`) can have its own: `owners` in the config, by the name in
+lowercase (`{"tamamo": {"app_voice_speed": 1}}`), overrides the `app_voice_*` settings for it. (The page's voice store
 alone isn't enough: it keeps only the five English voices, so a Japanese style left it at
 `buttery`, a man's voice, and no language was sent.) `app_voice_voice`
 and `app_voice_language` in the config, when set, override the voice and the language. Each reading

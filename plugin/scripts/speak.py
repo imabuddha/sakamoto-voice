@@ -63,6 +63,9 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
   app_voice_speed  0 (the default): the speed chosen in the app (Settings > General > Voice, at
             most 1.2). Set, a speed from 0.5 to 1.5 that app-voice.mjs asks for instead (the
             service closes the socket above 1.5).
+  owners    per-person overrides of the app_voice_* settings for a person's own session
+            (SAKAMOTO_OWNER), by the name in lowercase: {"tamamo": {"app_voice_speed": 1}}. Absent,
+            that session uses the settings above, as the main session does.
   app_voice_tap  where app-voice-tap is, when it's not in ~/.local/bin or on the PATH.
   ffmpeg    the ffmpeg that plays the app's voice on the Mac, when it's not on the PATH or in
             /opt/homebrew/bin.
@@ -218,6 +221,15 @@ def config():
     except (OSError, ValueError):
         pass
     return cfg
+
+
+def owner_settings(cfg, owner=None):
+    """cfg with this session's person's `owners` entry laid over it (owner: the name, else
+    OWNER_KEY); cfg as it is for the main session or a person with no entry. Only for reading: the
+    file keeps `owners` as it is."""
+    key = (OWNER_KEY if owner is None else owner).casefold()
+    extra = ((cfg or {}).get('owners') or {}).get(key) if key else None
+    return {**(cfg or {}), **extra} if isinstance(extra, dict) else (cfg or {})
 
 
 def save(cfg):
@@ -1729,6 +1741,7 @@ class AppVoice(Tap):
 
     def __init__(self, text, cfg=None):
         override = []
+        cfg = owner_settings(cfg)
         for key, flag in (('app_voice_voice', '--voice'), ('app_voice_language', '--language'),
                           ('app_voice_speed', '--speed')):
             value = str((cfg or {}).get(key) or '').strip()

@@ -2842,6 +2842,13 @@ class AppVoiceTests(FakeToolCase):
         self.assertEqual(self.read('voice-args').split('\n')[-3:-1], ['--speed', '1.5'])
         self.assertEqual(speak.DEFAULTS['app_voice_speed'], 0)
 
+    def test_a_person_can_have_their_own_voice_settings(self):
+        cfg = {'app_voice_speed': 1.5, 'owners': {'tamamo': {'app_voice_speed': 1}}}
+        self.assertEqual(speak.owner_settings(cfg, 'Tamamo')['app_voice_speed'], 1)
+        self.assertEqual(speak.owner_settings(cfg, '')['app_voice_speed'], 1.5)
+        self.assertEqual(speak.owner_settings(cfg, 'Anders')['app_voice_speed'], 1.5)
+        self.assertEqual(cfg['app_voice_speed'], 1.5)
+
     def test_start_app_voice_returns_it_once_audio_comes(self):
         with self.mode('ok'):
             voice = speak.start_app_voice('Hello', 'app-phone')
