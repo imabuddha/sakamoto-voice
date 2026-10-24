@@ -2828,6 +2828,20 @@ class AppVoiceTests(FakeToolCase):
         self.assertEqual(self.read('voice-args').split('\n')[-5:-1], ['--voice', 'ja-akarui', '--language', 'ja'])
         self.assertEqual((speak.DEFAULTS['app_voice_voice'], speak.DEFAULTS['app_voice_language']), ('', ''))
 
+    def test_the_config_can_set_the_speed(self):
+        # 0 (the default) keeps the account's speed: no --speed; set, it's passed on.
+        with self.mode('ok'):
+            voice = speak.AppVoice('Hello', {'app_voice_speed': 0})
+        voice.wait_ready(timeout=5)
+        voice.stop(grace=0)
+        self.assertNotIn('--speed', self.read('voice-args'))
+        with self.mode('ok'):
+            voice = speak.start_app_voice('Hello', 'app (Mac)', {'app_voice_speed': 1.5})
+        self.addCleanup(lambda: voice.proc.poll() is None and voice.proc.kill())
+        voice.stop(grace=0)
+        self.assertEqual(self.read('voice-args').split('\n')[-3:-1], ['--speed', '1.5'])
+        self.assertEqual(speak.DEFAULTS['app_voice_speed'], 0)
+
     def test_start_app_voice_returns_it_once_audio_comes(self):
         with self.mode('ok'):
             voice = speak.start_app_voice('Hello', 'app-phone')

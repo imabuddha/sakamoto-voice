@@ -60,6 +60,9 @@ Settings live in ~/.config/sakamoto-voice/config.json (created on first use):
   app_voice_voice, app_voice_language  empty (the default): the voice and language Read aloud
             uses (the account's settings: Settings > General > Voice). Set, a voice ID ("ja-akarui")
             or a language code ("ja") that app-voice.mjs asks for instead.
+  app_voice_speed  0 (the default): the speed chosen in the app (Settings > General > Voice, at
+            most 1.2). Set, a speed from 0.5 to 1.5 that app-voice.mjs asks for instead (the
+            service closes the socket above 1.5).
   app_voice_tap  where app-voice-tap is, when it's not in ~/.local/bin or on the PATH.
   ffmpeg    the ffmpeg that plays the app's voice on the Mac, when it's not on the PATH or in
             /opt/homebrew/bin.
@@ -195,7 +198,7 @@ DEFAULTS = {'enabled': True, 'voice_en': '', 'voice_ja': 'Kyoko', 'default_lang'
             'device': '', 'max_chars': 6000,
             'output': 'mac', 'phone_mode': 'text', 'phone_token': '', 'phone': '', 'phone_name': '',
             'app_voice_tap': '', 'dev_path': '', 'phone_remote': '', 'phone_voice': '', 'phone_route': '',
-            'app_voice': True, 'app_voice_voice': '', 'app_voice_language': ''}
+            'app_voice': True, 'app_voice_voice': '', 'app_voice_language': '', 'app_voice_speed': 0}
 OUTPUTS = ('mac', 'phone', 'both', 'app', 'app-both', 'app-phone')
 PHONE_OUTPUTS = ('phone', 'both', 'app-both', 'app-phone')       # the outputs a stop also tells the phone
 PHONE_MODES = ('text', 'audio')
@@ -1726,9 +1729,10 @@ class AppVoice(Tap):
 
     def __init__(self, text, cfg=None):
         override = []
-        for key, flag in (('app_voice_voice', '--voice'), ('app_voice_language', '--language')):
+        for key, flag in (('app_voice_voice', '--voice'), ('app_voice_language', '--language'),
+                          ('app_voice_speed', '--speed')):
             value = str((cfg or {}).get(key) or '').strip()
-            if value:
+            if value and value != '0':
                 override += [flag, value]
         self.proc = subprocess.Popen(
             [node_path() or 'node', app_voice_script(), '--port', str(APP_VOICE_PORT), '--rate', str(STREAM_RATE),
@@ -1752,7 +1756,7 @@ class AppVoice(Tap):
 
 def start_app_voice(text, who='app voice', cfg=None):
     """The app's voice reading `text`, once its first audio has come (AppVoice; cfg's
-    app_voice_voice and app_voice_language, when set, override Read aloud's); None when
+    app_voice_voice, app_voice_language, and app_voice_speed, when set, override Read aloud's); None when
     app-voice.mjs failed (logged, for the button's path, or the text, to take over). The caller has
     checked app_voice_on()."""
     if not text.strip():

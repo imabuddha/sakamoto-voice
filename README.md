@@ -560,8 +560,8 @@ account's settings the page holds (its account context, found in the page's Reac
 `voice_preference` (the style chosen in Settings > General > Voice: 明るい in Japanese is
 `ja-akarui`), else the store's voice; `voice_speed` (Fast is 1.2); `voice_language_code` (`ja`; none
 when unset). So it matches the button, and follows any change in Settings at the next reading,
-except for the speed: it reads at 1.5 (app-voice.mjs's `SPEED`; `--speed 0` sends the account's),
-faster than the app's settings go (its engine holds them to 0.7 to 1.2). (The page's voice store
+and `app_voice_speed` in the config (0.5 to 1.5; 0, the default, keeps the account's) can read faster
+than the app's settings go (its engine holds them to 0.7 to 1.2; the service refuses above 1.5). (The page's voice store
 alone isn't enough: it keeps only the five English voices, so a Japanese style left it at
 `buttery`, a man's voice, and no language was sent.) `app_voice_voice`
 and `app_voice_language` in the config, when set, override the voice and the language. Each reading

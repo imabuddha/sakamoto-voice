@@ -9,7 +9,8 @@
 //        node app-voice.mjs --stop [--port 9229]
 // The voice and language are Read aloud's own, from the account's settings in the page (as the
 // button passes them; app-voice-lib.mjs); --voice (a voice ID, "ja-akarui" say) and --language
-// ("ja") override them. The speed is SPEED, or --speed (0: the account's, as the button sends it).
+// ("ja") override them. The speed is the account's, as the button sends it (held to 0.7 to 1.2), or
+// --speed N (0.5 to 1.5; the config's app_voice_speed, through speak.py).
 // The text comes from --text, else standard input. The audio (16-bit mono PCM at --rate; the
 // service sends 16 kHz, resampled here) goes to standard output, as app-voice-tap --stdout's does,
 // paced as it plays (--lead seconds ahead), or, with --wav, into that file as fast as it comes.
@@ -33,10 +34,9 @@ const MAX_SECONDS = Number(opt('--max-seconds', '900')) || 900;
 const WAV = opt('--wav', '');
 const VOICE = opt('--voice', '');
 const LANGUAGE = opt('--language', '');
-// Miss Sakamoto's speed, sent as the service's tts_speed (John, 2026-10-24: 1.5). The app's own
+// --speed, sent as the service's tts_speed; 0 (the default) sends the account's. The app's own
 // settings go no faster than 1.2: its engine holds them to 0.7 to 1.2 (app-voice-lib.mjs).
-const SPEED = 1.5;
-const SPEED_ARG = Number(opt('--speed', String(SPEED)));
+const SPEED_ARG = Number(opt('--speed', '0'));
 const POLL_MS = 60;
 const FIRST_AUDIO_MS = 8000;    // no audio by then: give up (the button's path may still work)
 const SERVICE_RATE = 16000;

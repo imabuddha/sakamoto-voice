@@ -1,6 +1,6 @@
 // node --test plugin/tests/app-voice-speed.test.mjs: the speed app-voice.mjs asks the read-aloud
-// service for (tts_speed). Miss Sakamoto's own, SPEED (1.5), unless --speed says otherwise; with
-// --speed 0, the account's, held to 0.7 to 1.2 as the app's engine does. pageVoice runs here against
+// service for (tts_speed): by default (or --speed 0) the account's, held to 0.7 to 1.2 as the app's
+// engine does; with --speed N (the config's app_voice_speed), that speed, held to 0.5 to 1.5. pageVoice runs here against
 // a stand-in page (no engine module, a localStorage, a WebSocket that only notes its address), and
 // app-voice.mjs against a stand-in debugger that notes what it was asked to run. Nothing here opens
 // the Claude app or the network.
@@ -83,11 +83,11 @@ function startArg(...extra) {
   return JSON.parse(readFileSync(file, 'utf8'));
 }
 
-test('app-voice.mjs asks for SPEED, 1.5, by default', () => {
-  assert.equal(startArg().speed, 1.5);
+test('app-voice.mjs asks for the account speed by default', () => {
+  assert.equal(startArg().speed, '');
 });
 
 test('app-voice.mjs --speed: that speed; 0, the account speed', () => {
-  assert.equal(startArg('--speed', '1.2').speed, 1.2);
+  assert.equal(startArg('--speed', '1.5').speed, 1.5);
   assert.equal(startArg('--speed', '0').speed, '');
 });
