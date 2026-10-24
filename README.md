@@ -250,7 +250,8 @@ the plugin's hooks run in it as in any session) and `speak.py` is that person's 
   main session's page) and use its title: such a window is an `about:blank` page named only by its
   title. It has no read-aloud engine of its own, so `app-voice.mjs` borrows a session page's for the
   session's text; the audio still goes only to that person's phones. Their phone needs the same
-  pairing code as the Mac;
+  pairing code as the Mac. Readings in one page are kept apart by owner: a new reading (or a stop of
+  all) ends only that session's own earlier ones, so two people's sessions can read at the same moment;
 - `sakamoto announce "text"` speaks the text on **every** phone the hub lists (`all_phones`), whoever's
   session says it, except in rooms whose level is Mute or Ears off: a hub-wide announcement.
 
