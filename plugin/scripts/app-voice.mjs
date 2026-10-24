@@ -43,6 +43,8 @@ const SERVICE_RATE = 16000;
 
 // A person's own session (SAKAMOTO_OWNER): its page in the Claude app, named as in app-read.mjs.
 const WANTED_PAGE = (process.env.SAKAMOTO_RELAY_PAGE || '').trim().toLowerCase();
+// Whose readings these are: a reading stops only its own owner's others (pageVoice).
+const OWNER = (process.env.SAKAMOTO_OWNER || '').trim().toLowerCase();
 
 let ws = null;
 let nextId = 1;
@@ -124,7 +126,7 @@ const connect = async () => {
 
 const stopPage = async (which) => {
   if (!ws) return;
-  await evaluate(inPage(`(${pageVoice})('stop', ${JSON.stringify(which)})`), 1500);
+  await evaluate(inPage(`(${pageVoice})('stop', ${JSON.stringify({ which, owner: OWNER })})`), 1500);
 };
 
 const exit = (code, line) => {
@@ -173,7 +175,7 @@ async function speakMode() {
   process.on('SIGINT', () => quit('SIGINT'));
 
   const t0 = Date.now();
-  const started = await evaluate(inPage(`(${pageVoice})('start', ${JSON.stringify({ id: session, text, voice: VOICE, language: LANGUAGE, speed: SPEED_ARG > 0 ? SPEED_ARG : '' })})`), 15000);
+  const started = await evaluate(inPage(`(${pageVoice})('start', ${JSON.stringify({ id: session, owner: OWNER, text, voice: VOICE, language: LANGUAGE, speed: SPEED_ARG > 0 ? SPEED_ARG : '' })})`), 15000);
   if (started.error || !started.id) return exit(2, `could not start: ${started.error || JSON.stringify(started).slice(0, 200)}`);
   pageId = started.page;
   const notes = started.notes?.length ? `; ${started.notes.join(', ')}` : '';

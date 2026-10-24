@@ -79,9 +79,15 @@ export async function pageVoice(cmd, arg) {
     }
     return out;
   };
+  // Each session's readings are its own (SAKAMOTO_OWNER; '' for the main session): a new reading,
+  // or a stop of '*', ends only that owner's, so two people's sessions reading in one page don't cut
+  // each other off (John and Tamamo, 2026-10-24). arg for stop: an id, '*', or { which, owner }.
+  const ownerOf = (a) => String((a && typeof a === 'object' && a.owner) || '');
   if (cmd === 'stop') {
+    const which = arg && typeof arg === 'object' ? arg.which : arg;
+    const owner = ownerOf(arg);
     for (const [id, s] of Object.entries(V.sessions)) {
-      if (arg === '*' || arg === id) {
+      if ((which === '*' && (s.owner || '') === owner) || which === id) {
         end(s, 'stopped');
         delete V.sessions[id];
       }
@@ -91,8 +97,9 @@ export async function pageVoice(cmd, arg) {
   }
   if (cmd !== 'start') return { error: 'unknown command ' + cmd };
 
-  // A new reading supersedes any other (as the app's engine does).
+  // A new reading supersedes the same owner's others (as the app's engine does for one person).
   for (const [id, s] of Object.entries(V.sessions)) {
+    if ((s.owner || '') !== ownerOf(arg)) continue;
     end(s, 'superseded');
     delete V.sessions[id];
   }
@@ -230,7 +237,7 @@ export async function pageVoice(cmd, arg) {
   if (!pieces.length) return { error: 'nothing to read' };
 
   const id = String(arg.id);
-  const s = { ws: null, state: 'connecting', audio: [], events: [], error: null, closed: false, lastPoll: Date.now(), lastSent: Date.now() };
+  const s = { owner: ownerOf(arg), ws: null, state: 'connecting', audio: [], events: [], error: null, closed: false, lastPoll: Date.now(), lastSent: Date.now() };
   V.sessions[id] = s;
   const ws = new WebSocket(url);
   s.ws = ws;
