@@ -5,11 +5,11 @@
 // undocumented endpoint, which may change or go away with any update of the app or the site.
 //
 // Usage: node app-voice.mjs [--port 9229] [--rate 24000] [--lead 1.0] [--max-seconds 900]
-//                           [--voice ID] [--language CODE] [--wav FILE] [--text TEXT]
+//                           [--voice ID] [--language CODE] [--speed N] [--wav FILE] [--text TEXT]
 //        node app-voice.mjs --stop [--port 9229]
-// The voice, speed, and language are Read aloud's own, from the account's settings in the page (as
-// the button passes them; app-voice-lib.mjs); --voice (a voice ID, "ja-akarui" say) and --language
-// ("ja") override them.
+// The voice and language are Read aloud's own, from the account's settings in the page (as the
+// button passes them; app-voice-lib.mjs); --voice (a voice ID, "ja-akarui" say) and --language
+// ("ja") override them. The speed is SPEED, or --speed (0: the account's, as the button sends it).
 // The text comes from --text, else standard input. The audio (16-bit mono PCM at --rate; the
 // service sends 16 kHz, resampled here) goes to standard output, as app-voice-tap --stdout's does,
 // paced as it plays (--lead seconds ahead), or, with --wav, into that file as fast as it comes.
@@ -33,6 +33,10 @@ const MAX_SECONDS = Number(opt('--max-seconds', '900')) || 900;
 const WAV = opt('--wav', '');
 const VOICE = opt('--voice', '');
 const LANGUAGE = opt('--language', '');
+// Miss Sakamoto's speed, sent as the service's tts_speed (John, 2026-10-24: 1.5). The app's own
+// settings go no faster than 1.2: its engine holds them to 0.7 to 1.2 (app-voice-lib.mjs).
+const SPEED = 1.5;
+const SPEED_ARG = Number(opt('--speed', String(SPEED)));
 const POLL_MS = 60;
 const FIRST_AUDIO_MS = 8000;    // no audio by then: give up (the button's path may still work)
 const SERVICE_RATE = 16000;
@@ -169,7 +173,7 @@ async function speakMode() {
   process.on('SIGINT', () => quit('SIGINT'));
 
   const t0 = Date.now();
-  const started = await evaluate(inPage(`(${pageVoice})('start', ${JSON.stringify({ id: session, text, voice: VOICE, language: LANGUAGE })})`), 15000);
+  const started = await evaluate(inPage(`(${pageVoice})('start', ${JSON.stringify({ id: session, text, voice: VOICE, language: LANGUAGE, speed: SPEED_ARG > 0 ? SPEED_ARG : '' })})`), 15000);
   if (started.error || !started.id) return exit(2, `could not start: ${started.error || JSON.stringify(started).slice(0, 200)}`);
   pageId = started.page;
   const notes = started.notes?.length ? `; ${started.notes.join(', ')}` : '';

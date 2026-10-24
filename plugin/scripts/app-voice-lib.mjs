@@ -30,9 +30,11 @@
 //             then held to 0.7 to 1.2, as the engine does
 //   language  settings.voice_language_code ("ja"; none when unset, as the button sends none)
 //   organization  the active organization's uuid
-// arg.voice, arg.speed, and arg.language, when given, override these. The account's settings follow
-// any change made in Settings at once (the page updates its context), so each reading uses the
-// current ones.
+// arg.voice, arg.speed, and arg.language, when given, override these; arg.speed (app-voice.mjs's
+// SPEED) is sent as given, held to 0.5 to 1.5, not to the engine's 1.2 (the server closes the socket,
+// 1003, at 1.75 and 2; measured 2026-10-24). The account's settings
+// follow any change made in Settings at once (the page updates its context), so each reading uses
+// the current ones.
 //
 // The page is left clean: a session ends when the stream is done, on stop, or when nobody has
 // drained it for WATCHDOG_MS (app-voice.mjs gone); with no session left, the object is removed.
@@ -175,10 +177,11 @@ export async function pageVoice(cmd, arg) {
   const settings = (account && account.account && account.account.settings) || {};
   const voice = arg.voice || settings.voice_preference || state.selectedVoice || stored('claude-selected-voice') || 'buttery';
   const saved = settings.voice_speed;
-  let speed = Number(arg.speed || (typeof saved === 'number' && saved >= 0.5 && saved <= 2 ? saved : 0) ||
+  const asked = Number(arg.speed);
+  let speed = Number((typeof saved === 'number' && saved >= 0.5 && saved <= 2 ? saved : 0) ||
     state.voiceSpeed || stored('claude-voice-speed') || 1);
   if (!(speed > 0)) speed = 1;
-  speed = Math.min(1.2, Math.max(0.7, speed)).toFixed(2);
+  speed = (asked > 0 ? Math.min(1.5, Math.max(0.5, asked)) : Math.min(1.2, Math.max(0.7, speed))).toFixed(2);
   const language = arg.language || settings.voice_language_code || '';
   const organization = arg.organization || (account && account.activeOrganization && account.activeOrganization.uuid) || '';
   let platform = 'desktop_app';
