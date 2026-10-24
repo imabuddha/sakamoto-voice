@@ -31,8 +31,8 @@
 //   language  settings.voice_language_code ("ja"; none when unset, as the button sends none)
 //   organization  the active organization's uuid
 // arg.voice, arg.speed, and arg.language, when given, override these; arg.speed (app-voice.mjs's
-// SPEED) is sent as given, held to 0.5 to 1.5, not to the engine's 1.2 (the server closes the socket,
-// 1003, at 1.75 and 2; measured 2026-10-24). The account's settings
+// --speed, the config's app_voice_speed) is sent as given, held to 0.5 to 1.5, not to the engine's
+// 1.2 (the server closes the socket, 1003, at 1.75 and 2; measured 2026-10-24). The account's settings
 // follow any change made in Settings at once (the page updates its context), so each reading uses
 // the current ones.
 //
